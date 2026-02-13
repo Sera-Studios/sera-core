@@ -1,0 +1,28 @@
+{
+  "name": "@sera/core",
+  "version": "0.1.0",
+  "description": "Sera Core - persistent daemon for audit data management, MCP hosting, and cross-client event distribution",
+  "main": "out/server.js",
+  "bin": {
+    "sera-core": "out/cli.js"
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "start": "node out/server.js",
+    "dev": "npm run compile && node out/server.js"
+  },
+  "dependencies": {
+    "@sera/types": "file:../../packages/sera-types",
+    "express": "^4.21.0",
+    "sql.js": "^1.11.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "@types/sql.js": "^1.4.9",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.4.0"
+  }
+}
