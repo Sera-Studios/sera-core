@@ -56,12 +56,12 @@ async function main(): Promise<void> {
 }
 
 async function startForeground(): Promise<void> {
-    // Write PID file
-    fs.writeFileSync(PID_FILE, String(process.pid));
-
-    // Import and run server
+    // Import and run server (SeraCore constructor calls ensureSeraHome)
     const { SeraCore } = await import('./server');
     const core = new SeraCore();
+
+    // Write PID file (after ensureSeraHome created ~/.sera/)
+    fs.writeFileSync(PID_FILE, String(process.pid));
 
     const shutdown = async () => {
         await core.stop();
