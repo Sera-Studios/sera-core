@@ -10,6 +10,7 @@
  *   sera-core status         Show running state
  *   sera-core list           List all audits
  *   sera-core health         Check daemon health
+ *   sera-core migrate <path> Migrate workspace database to sera-core
  */
 
 import * as http from 'http';
@@ -44,6 +45,9 @@ async function main(): Promise<void> {
             break;
         case 'health':
             await checkHealth();
+            break;
+        case 'migrate':
+            await migrateWorkspace(args[1]);
             break;
         default:
             printUsage();
@@ -170,6 +174,64 @@ async function checkHealth(): Promise<void> {
     }
 }
 
+async function migrateWorkspace(workspacePath?: string): Promise<void> {
+    if (!workspacePath) {
+        console.error('Usage: sera-core migrate <workspace-path>');
+        console.error('  Migrates .vscode/sera-studio.db from a workspace to sera-core');
+        process.exit(1);
+    }
+
+    const resolved = path.resolve(workspacePath);
+    const dbSource = path.join(resolved, '.vscode', 'sera-studio.db');
+
+    if (!fs.existsSync(resolved)) {
+        console.error(`Workspace not found: ${resolved}`);
+        process.exit(1);
+    }
+
+    if (!fs.existsSync(dbSource)) {
+        console.error(`No database found at: ${dbSource}`);
+        process.exit(1);
+    }
+
+    const { ensureSeraHome } = await import('./config');
+    ensureSeraHome();
+
+    const { AuditRegistry } = await import('./database/AuditRegistry');
+    const registry = new AuditRegistry();
+    registry.load();
+
+    // Check if workspace is already registered
+    const existingSlug = registry.lookupWorkspace(resolved);
+    if (existingSlug) {
+        console.log(`Workspace already registered as audit '${existingSlug}'`);
+        return;
+    }
+
+    // Derive audit name from folder name
+    const folderName = path.basename(resolved);
+    const slug = AuditRegistry.slugify(folderName);
+
+    if (registry.auditExists(slug)) {
+        console.error(`Audit '${slug}' already exists. Register workspace manually.`);
+        process.exit(1);
+    }
+
+    // Create audit and copy database
+    const dbDest = registry.createAudit(slug, folderName, resolved);
+    fs.copyFileSync(dbSource, dbDest);
+
+    // Backup original
+    const backupPath = dbSource + '.migrated';
+    fs.renameSync(dbSource, backupPath);
+
+    console.log(`Migrated successfully:`);
+    console.log(`  Audit:    ${slug}`);
+    console.log(`  From:     ${dbSource}`);
+    console.log(`  To:       ${dbDest}`);
+    console.log(`  Backup:   ${backupPath}`);
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -215,12 +277,13 @@ function formatUptime(seconds: number): string {
 function printUsage(): void {
     console.log('Usage: sera-core <command>\n');
     console.log('Commands:');
-    console.log('  start          Start daemon (foreground)');
-    console.log('  start -d       Start daemon (background/detached)');
-    console.log('  stop           Stop daemon');
-    console.log('  status         Show running state, connected clients, active audits');
-    console.log('  list           List all audits with metadata');
-    console.log('  health         Show health check JSON');
+    console.log('  start              Start daemon (foreground)');
+    console.log('  start -d           Start daemon (background/detached)');
+    console.log('  stop               Stop daemon');
+    console.log('  status             Show running state, connected clients, active audits');
+    console.log('  list               List all audits with metadata');
+    console.log('  health             Show health check JSON');
+    console.log('  migrate <path>     Migrate workspace database to sera-core');
 }
 
 main().catch((err) => {
