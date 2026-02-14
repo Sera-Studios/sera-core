@@ -22,6 +22,7 @@ import { MCPServer } from './mcp/MCPServer';
 import { CoreHandler } from './mcp/handlers/CoreHandler';
 import { QuizHandler } from './mcp/handlers/QuizHandler';
 import { TestCoverageHandler } from './mcp/handlers/TestCoverageHandler';
+import { NotepadHandler } from './mcp/handlers/NotepadHandler';
 
 export class SeraCore {
     private config: SeraConfig;
@@ -60,6 +61,7 @@ export class SeraCore {
         ));
         this.mcpServer.registerHandler(new QuizHandler());
         this.mcpServer.registerHandler(new TestCoverageHandler());
+        this.mcpServer.registerHandler(new NotepadHandler());
 
         console.log('[sera-core] MCP handlers registered');
     }
