@@ -1,0 +1,13 @@
+[Unit]
+Description=Sera Core - Audit Data Management Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env node %h/.vscode/extensions/audit-heatmap-0.0.1/sera-core/out/server.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target
