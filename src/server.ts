@@ -2,9 +2,10 @@
  * @fileoverview sera-core daemon entry point
  * @module sera-core/server
  *
- * Starts the HTTP/WebSocket server (port 9800) with:
+ * Starts the HTTP/WebSocket server (port 9800) and MCP server (port 9877) with:
  * - REST API for audit management and health checks
  * - WebSocket API for client connections (VS Code, dashboard)
+ * - MCP HTTP API for Claude Code agent tool calls
  * - Database management with per-audit StorageEngines
  * - EventBridge for cross-client event distribution
  */
@@ -17,6 +18,10 @@ import { DatabaseManager } from './database/DatabaseManager';
 import { EventBridge } from './events/EventBridge';
 import { WebSocketAPI } from './api/WebSocketAPI';
 import { RestAPI } from './api/RestAPI';
+import { MCPServer } from './mcp/MCPServer';
+import { CoreHandler } from './mcp/handlers/CoreHandler';
+import { QuizHandler } from './mcp/handlers/QuizHandler';
+import { TestCoverageHandler } from './mcp/handlers/TestCoverageHandler';
 
 export class SeraCore {
     private config: SeraConfig;
@@ -25,6 +30,7 @@ export class SeraCore {
     private bridge: EventBridge;
     private wsApi: WebSocketAPI;
     private restApi: RestAPI;
+    private mcpServer: MCPServer;
     private server!: http.Server;
 
     constructor() {
@@ -39,6 +45,23 @@ export class SeraCore {
 
         this.wsApi = new WebSocketAPI(this.dbManager, this.registry, this.bridge);
         this.restApi = new RestAPI(this.registry, this.dbManager, () => this.wsApi.getClientCount());
+
+        // Initialize MCP server with handlers
+        this.mcpServer = new MCPServer(this.dbManager, this.registry, this.bridge);
+        this.registerMcpHandlers();
+    }
+
+    /**
+     * Register all portable MCP handlers
+     */
+    private registerMcpHandlers(): void {
+        this.mcpServer.registerHandler(new CoreHandler(
+            () => this.mcpServer.getActiveSessionCount()
+        ));
+        this.mcpServer.registerHandler(new QuizHandler());
+        this.mcpServer.registerHandler(new TestCoverageHandler());
+
+        console.log('[sera-core] MCP handlers registered');
     }
 
     /**
@@ -52,15 +75,25 @@ export class SeraCore {
         this.server = http.createServer(app);
         this.wsApi.attach(this.server);
 
-        return new Promise((resolve) => {
+        // Start client WebSocket + REST server
+        await new Promise<void>((resolve) => {
             this.server.listen(this.config.ports.client, () => {
-                console.log(`[sera-core] Server started on port ${this.config.ports.client}`);
+                console.log(`[sera-core] Client server started on port ${this.config.ports.client}`);
                 console.log(`[sera-core] REST API: http://localhost:${this.config.ports.client}/api/health`);
                 console.log(`[sera-core] WebSocket: ws://localhost:${this.config.ports.client}`);
                 console.log(`[sera-core] Registered audits: ${this.registry.listAudits().length}`);
                 resolve();
             });
         });
+
+        // Start MCP server on separate port
+        await this.mcpServer.start(this.config.ports.mcp);
+        console.log(`[sera-core] MCP server: http://localhost:${this.config.ports.mcp}/mcp`);
+
+        // Start periodic session cleanup
+        setInterval(() => {
+            this.mcpServer.cleanupStaleSessions(90_000);
+        }, 30_000);
     }
 
     /**
@@ -68,6 +101,9 @@ export class SeraCore {
      */
     async stop(): Promise<void> {
         console.log('[sera-core] Shutting down...');
+
+        // Stop MCP server
+        await this.mcpServer.stop();
 
         // Close WebSocket connections
         this.wsApi.shutdown();
