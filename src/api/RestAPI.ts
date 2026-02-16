@@ -9,10 +9,11 @@
 import { Router, Request, Response } from 'express';
 import { AuditRegistry } from '../database/AuditRegistry';
 import { DatabaseManager } from '../database/DatabaseManager';
-import { HealthResponse, AgentRegistration } from '@sera/types';
+import { HealthResponse, AgentRegistration, PipelineSpec } from '@sera/types';
 import { AgentLifecycleManager } from '../agents/AgentLifecycleManager';
 import { AgentDefinitionLoader } from '../agents/AgentDefinitionLoader';
 import { AgentRegistrationStore } from '../agents/AgentRegistrationStore';
+import { PipelineEngine } from '../pipeline/PipelineEngine';
 
 export class RestAPI {
     private router: Router;
@@ -23,6 +24,7 @@ export class RestAPI {
     private agentManager: AgentLifecycleManager;
     private agentLoader: AgentDefinitionLoader;
     private registrationStore: AgentRegistrationStore;
+    private pipelineEngine: PipelineEngine;
 
     constructor(
         registry: AuditRegistry,
@@ -30,7 +32,8 @@ export class RestAPI {
         getClientCount: () => number,
         agentManager: AgentLifecycleManager,
         agentLoader: AgentDefinitionLoader,
-        registrationStore: AgentRegistrationStore
+        registrationStore: AgentRegistrationStore,
+        pipelineEngine: PipelineEngine
     ) {
         this.router = Router();
         this.registry = registry;
@@ -40,6 +43,7 @@ export class RestAPI {
         this.agentManager = agentManager;
         this.agentLoader = agentLoader;
         this.registrationStore = registrationStore;
+        this.pipelineEngine = pipelineEngine;
         this.setupRoutes();
     }
 
@@ -349,6 +353,197 @@ export class RestAPI {
         // List available adapter types
         this.router.get('/api/agents/adapters', (_req: Request, res: Response) => {
             res.json({ message: 'Use GET /api/agents/registrations for available agents' });
+        });
+
+        // ====================================================================
+        // Pipeline endpoints
+        // ====================================================================
+
+        // Execute a pipeline
+        this.router.post('/api/pipelines/execute', async (req: Request, res: Response) => {
+            const { spec, variables, auditSlug, workspacePath } = req.body;
+
+            if (!spec || !auditSlug) {
+                res.status(400).json({ error: 'spec and auditSlug are required' });
+                return;
+            }
+
+            try {
+                // Start execution asynchronously
+                const executePromise = this.pipelineEngine.execute(
+                    spec as PipelineSpec,
+                    variables ?? {},
+                    auditSlug,
+                    workspacePath
+                );
+
+                // Wait briefly for initialization
+                const run = await Promise.race([
+                    executePromise,
+                    new Promise<null>(resolve => setTimeout(() => resolve(null), 500)),
+                ]);
+
+                if (run) {
+                    res.status(201).json({ runId: run.id, state: run.state });
+                } else {
+                    // Still running - get latest run
+                    const runs = await this.pipelineEngine.listRuns(auditSlug);
+                    const latest = runs[runs.length - 1];
+                    res.status(202).json({ runId: latest?.id ?? 'unknown', state: 'running' });
+                }
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // List pipeline runs
+        this.router.get('/api/pipelines/runs', async (req: Request, res: Response) => {
+            const auditSlug = req.query.auditSlug as string | undefined;
+            try {
+                const runs = await this.pipelineEngine.listRuns(auditSlug);
+                res.json({ runs });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Get pipeline run status
+        this.router.get('/api/pipelines/runs/:runId', async (req: Request, res: Response) => {
+            const { runId } = req.params;
+            const auditSlug = req.query.auditSlug as string;
+            if (!auditSlug) {
+                res.status(400).json({ error: 'auditSlug query parameter is required' });
+                return;
+            }
+
+            try {
+                const run = await this.pipelineEngine.getStatus(runId, auditSlug);
+                if (!run) {
+                    res.status(404).json({ error: 'Pipeline run not found' });
+                    return;
+                }
+                const nodeRuns = await this.pipelineEngine.getNodeRuns(runId, auditSlug);
+                res.json({ run, nodeRuns });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Get pipeline run events
+        this.router.get('/api/pipelines/runs/:runId/events', async (req: Request, res: Response) => {
+            const { runId } = req.params;
+            const auditSlug = req.query.auditSlug as string;
+            if (!auditSlug) {
+                res.status(400).json({ error: 'auditSlug query parameter is required' });
+                return;
+            }
+
+            try {
+                const events = await this.pipelineEngine.getEvents(runId, auditSlug);
+                res.json({ events });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Pause a pipeline run
+        this.router.post('/api/pipelines/runs/:runId/pause', async (req: Request, res: Response) => {
+            try {
+                await this.pipelineEngine.pause(req.params.runId);
+                res.json({ runId: req.params.runId, action: 'paused' });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Resume a pipeline run
+        this.router.post('/api/pipelines/runs/:runId/resume', async (req: Request, res: Response) => {
+            try {
+                await this.pipelineEngine.resume(req.params.runId);
+                res.json({ runId: req.params.runId, action: 'resumed' });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Cancel a pipeline run
+        this.router.post('/api/pipelines/runs/:runId/cancel', async (req: Request, res: Response) => {
+            try {
+                await this.pipelineEngine.cancel(req.params.runId);
+                res.json({ runId: req.params.runId, action: 'cancelled' });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Resolve HITL approval
+        this.router.post('/api/pipelines/runs/:runId/hitl/:nodeId', (req: Request, res: Response) => {
+            const { runId, nodeId } = req.params;
+            const { approved } = req.body;
+
+            if (typeof approved !== 'boolean') {
+                res.status(400).json({ error: 'approved (boolean) is required' });
+                return;
+            }
+
+            const resolved = this.pipelineEngine.resolveHITL(runId, nodeId, approved);
+            if (resolved) {
+                res.json({ runId, nodeId, approved, resolved: true });
+            } else {
+                res.status(404).json({ error: 'No pending HITL approval found for this node' });
+            }
+        });
+
+        // Save a pipeline spec
+        this.router.post('/api/pipelines/specs', async (req: Request, res: Response) => {
+            const { auditSlug, spec } = req.body;
+            if (!auditSlug || !spec) {
+                res.status(400).json({ error: 'auditSlug and spec are required' });
+                return;
+            }
+
+            try {
+                await this.pipelineEngine.saveSpec(auditSlug, spec as PipelineSpec);
+                res.status(201).json({ id: spec.id, saved: true });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // List pipeline specs
+        this.router.get('/api/pipelines/specs', async (req: Request, res: Response) => {
+            const auditSlug = req.query.auditSlug as string;
+            if (!auditSlug) {
+                res.status(400).json({ error: 'auditSlug query parameter is required' });
+                return;
+            }
+
+            try {
+                const specs = await this.pipelineEngine.listSpecs(auditSlug);
+                res.json({ specs });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Get a pipeline spec
+        this.router.get('/api/pipelines/specs/:id', async (req: Request, res: Response) => {
+            const auditSlug = req.query.auditSlug as string;
+            if (!auditSlug) {
+                res.status(400).json({ error: 'auditSlug query parameter is required' });
+                return;
+            }
+
+            try {
+                const spec = await this.pipelineEngine.getSpec(auditSlug, req.params.id);
+                if (!spec) {
+                    res.status(404).json({ error: 'Pipeline spec not found' });
+                    return;
+                }
+                res.json(spec);
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
         });
     }
 }
