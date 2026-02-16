@@ -52,6 +52,9 @@ async function main(): Promise<void> {
         case 'build':
             await buildPipeline(args.slice(1));
             break;
+        case 'compile':
+            await compilePipeline(args.slice(1));
+            break;
         default:
             printUsage();
             break;
@@ -308,6 +311,66 @@ async function buildPipeline(args: string[]): Promise<void> {
     }
 }
 
+async function compilePipeline(args: string[]): Promise<void> {
+    let specPath: string | undefined;
+    let framework: string | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+        switch (args[i]) {
+            case '--spec':
+                specPath = args[++i];
+                break;
+            case '--framework':
+                framework = args[++i];
+                break;
+        }
+    }
+
+    if (!specPath) {
+        console.error('Usage: sera-core compile --spec <path> [--framework pydantic-ai]');
+        process.exit(1);
+    }
+
+    const resolved = path.resolve(specPath);
+    if (!fs.existsSync(resolved)) {
+        console.error(`Pipeline spec not found: ${resolved}`);
+        process.exit(1);
+    }
+
+    const spec = JSON.parse(fs.readFileSync(resolved, 'utf-8'));
+    if (framework) {
+        spec.framework = framework;
+    }
+
+    const { CompilerRegistry } = await import('./compiler/CompilerRegistry');
+    const { PydanticAICompiler } = await import('./compiler/PydanticAICompiler');
+
+    const registry = new CompilerRegistry();
+    registry.register(new PydanticAICompiler());
+
+    const targetFramework = spec.framework ?? 'pydantic-ai';
+    const compiler = registry.getCompiler(targetFramework);
+    const result = compiler.compile(spec);
+
+    // Output generated script to stdout
+    process.stdout.write(result.script);
+
+    // Print warnings to stderr
+    if (result.warnings.length > 0) {
+        for (const w of result.warnings) {
+            console.error(`[warning] ${w}`);
+        }
+    }
+
+    // Print supporting file info to stderr
+    if (result.files.length > 0) {
+        console.error(`\n[info] Supporting files (use --output with build command to write them):`);
+        for (const f of result.files) {
+            console.error(`  ${f.name}`);
+        }
+    }
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -360,6 +423,9 @@ function printUsage(): void {
     console.log('  list               List all audits with metadata');
     console.log('  health             Show health check JSON');
     console.log('  migrate <path>     Migrate workspace database to sera-core');
+    console.log('  compile            Compile a pipeline spec to executable code');
+    console.log('    --spec <path>    Path to pipeline spec JSON (required)');
+    console.log('    --framework <f>  Override framework (default: from spec or pydantic-ai)');
     console.log('  build              Build a packaged pipeline');
     console.log('    --spec <path>    Path to pipeline spec JSON (required)');
     console.log('    --tag <tag>      Docker image tag');

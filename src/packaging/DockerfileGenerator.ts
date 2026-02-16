@@ -10,9 +10,12 @@ import type { PipelineSpec, DockerBuildConfig, DockerLayer } from '@sera/types';
 
 /**
  * Analyze a pipeline spec to determine the appropriate base image.
- * Defaults to node:20-alpine unless a python-based runtime is detected.
+ * Uses python:3.11-slim for framework-based pipelines, node:20-alpine otherwise.
  */
 function selectBaseImage(spec: PipelineSpec): string {
+    if (spec.framework === 'pydantic-ai' || spec.framework === 'langgraph') {
+        return 'python:3.11-slim';
+    }
     const runtimes = spec.nodes.map(n => n.config.runtime as string | undefined).filter(Boolean);
     if (runtimes.some(r => r === 'pydantic-ai' || r === 'python')) {
         return 'python:3.11-slim';
@@ -67,12 +70,21 @@ export function buildDockerConfig(spec: PipelineSpec): DockerBuildConfig {
     });
 
     // Entrypoint script
-    layers.push({
-        comment: 'Copy entrypoint',
-        commands: [
-            'COPY entrypoint.js .',
-        ],
-    });
+    if (isPython) {
+        layers.push({
+            comment: 'Copy compiled pipeline script',
+            commands: [
+                'COPY pipeline.py .',
+            ],
+        });
+    } else {
+        layers.push({
+            comment: 'Copy entrypoint',
+            commands: [
+                'COPY entrypoint.js .',
+            ],
+        });
+    }
 
     // Environment variables from spec
     const environment: Record<string, string> = {};

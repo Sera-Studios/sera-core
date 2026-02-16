@@ -15,6 +15,8 @@ import type { PipelineSpec, BuildResult, PackagingFormat } from '@sera/types';
 import { generateDockerfileFromSpec } from './DockerfileGenerator';
 import { generateEntrypoint } from './EntrypointGenerator';
 import { generateManifest } from './ManifestGenerator';
+import { CompilerRegistry } from '../compiler/CompilerRegistry';
+import { PydanticAICompiler } from '../compiler/PydanticAICompiler';
 
 export interface BuildOptions {
     /** Docker image tag */
@@ -71,22 +73,42 @@ export async function build(spec: PipelineSpec, options: BuildOptions = {}): Pro
         'utf-8'
     );
 
-    // Generate entrypoint
-    const entrypoint = generateEntrypoint(spec);
-    fs.writeFileSync(path.join(outputDir, 'entrypoint.js'), entrypoint, 'utf-8');
+    // Generate executable code
+    const framework = spec.framework;
+    if (framework) {
+        // Use compiler to generate Python script
+        const registry = new CompilerRegistry();
+        registry.register(new PydanticAICompiler());
 
-    // Generate package.json for node dependencies
-    const packageJson = {
-        name: `sera-pipeline-${spec.id}`,
-        version: spec.version,
-        private: true,
-        main: 'entrypoint.js',
-    };
-    fs.writeFileSync(
-        path.join(outputDir, 'package.json'),
-        JSON.stringify(packageJson, null, 2),
-        'utf-8'
-    );
+        const compiler = registry.getCompiler(framework);
+        const compiled = compiler.compile(spec);
+
+        if (compiled.warnings.length > 0) {
+            warnings.push(...compiled.warnings);
+        }
+
+        // Write compiled script and supporting files
+        fs.writeFileSync(path.join(outputDir, compiled.scriptFilename), compiled.script, 'utf-8');
+        for (const file of compiled.files) {
+            fs.writeFileSync(path.join(outputDir, file.name), file.content, 'utf-8');
+        }
+    } else {
+        // Legacy: generate Node.js entrypoint for specs without a framework
+        const entrypoint = generateEntrypoint(spec);
+        fs.writeFileSync(path.join(outputDir, 'entrypoint.js'), entrypoint, 'utf-8');
+
+        const packageJson = {
+            name: `sera-pipeline-${spec.id}`,
+            version: spec.version,
+            private: true,
+            main: 'entrypoint.js',
+        };
+        fs.writeFileSync(
+            path.join(outputDir, 'package.json'),
+            JSON.stringify(packageJson, null, 2),
+            'utf-8'
+        );
+    }
 
     if (format === 'docker') {
         // Generate Dockerfile

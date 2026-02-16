@@ -51,11 +51,12 @@ export function generateManifest(spec: PipelineSpec, format: PackagingFormat): A
     return {
         name: spec.name,
         version: spec.version,
+        framework: spec.framework,
         format,
         pipelineSpec: 'pipeline.json',
         execution: {
             type: format,
-            config: getExecutionConfig(format),
+            config: getExecutionConfig(format, spec.framework),
         },
         environment,
         tools: Array.from(tools),
@@ -63,13 +64,18 @@ export function generateManifest(spec: PipelineSpec, format: PackagingFormat): A
     };
 }
 
-function getExecutionConfig(format: PackagingFormat): Record<string, unknown> {
+function getExecutionConfig(format: PackagingFormat, framework?: string): Record<string, unknown> {
+    const isPython = framework === 'pydantic-ai' || framework === 'langgraph';
     switch (format) {
         case 'docker':
             return { network: 'host', restartPolicy: 'no' };
         case 'process':
-            return { command: 'node', args: ['entrypoint.js'] };
+            return isPython
+                ? { command: 'python3', args: ['pipeline.py'] }
+                : { command: 'node', args: ['entrypoint.js'] };
         case 'script':
-            return { interpreter: 'node', script: 'entrypoint.js' };
+            return isPython
+                ? { interpreter: 'python3', script: 'pipeline.py' }
+                : { interpreter: 'node', script: 'entrypoint.js' };
     }
 }
