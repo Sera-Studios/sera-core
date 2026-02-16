@@ -37,6 +37,8 @@ import { ProcessAdapter } from './agents/adapters/ProcessAdapter';
 import { ScriptAdapter } from './agents/adapters/ScriptAdapter';
 import { PipelineEngine } from './pipeline/PipelineEngine';
 import { PipelinePersistence } from './pipeline/PipelinePersistence';
+import { CompilerRegistry } from './compiler/CompilerRegistry';
+import { PydanticAICompiler } from './compiler/PydanticAICompiler';
 
 export class SeraCore {
     private config: SeraConfig;
@@ -75,10 +77,14 @@ export class SeraCore {
             this.adapterRegistry, this.registrationStore, this.config.ports.mcp
         );
 
+        // Initialize pipeline compiler registry
+        const compilerRegistry = new CompilerRegistry();
+        compilerRegistry.register(new PydanticAICompiler());
+
         // Initialize pipeline engine
         const pipelinePersistence = new PipelinePersistence(this.dbManager);
         this.pipelineEngine = new PipelineEngine(
-            pipelinePersistence, this.agentManager, this.bridge, this.config.ports.mcp
+            pipelinePersistence, compilerRegistry, this.bridge
         );
 
         this.wsApi = new WebSocketAPI(this.dbManager, this.registry, this.bridge);

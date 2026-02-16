@@ -123,6 +123,24 @@ const PIPELINE_TOOLS: McpToolDefinition[] = [
             required: ['run_id'],
         },
     },
+    {
+        name: 'compile_pipeline',
+        description: 'Compile a pipeline spec to executable code without running it. Returns the generated script and supporting files.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                spec: {
+                    description: 'Pipeline specification object (PipelineSpec JSON)',
+                    type: 'object',
+                },
+                variables: {
+                    description: 'Variable overrides for compilation',
+                    type: 'object',
+                },
+            },
+            required: ['spec'],
+        },
+    },
 ];
 
 // ============================================================================
@@ -163,6 +181,9 @@ export class PipelineHandler implements PortableMcpHandler {
 
             case 'cancel_pipeline':
                 return this.handleCancel(args);
+
+            case 'compile_pipeline':
+                return this.handleCompile(args);
 
             default:
                 throw new Error(`Unknown pipeline tool: ${toolName}`);
@@ -267,5 +288,17 @@ export class PipelineHandler implements PortableMcpHandler {
         const runId = args.run_id as string;
         await this.engine.cancel(runId);
         return { run_id: runId, action: 'cancelled' };
+    }
+
+    private handleCompile(args: Record<string, unknown>): unknown {
+        const spec = args.spec as PipelineSpec;
+        const variables = args.variables as Record<string, unknown> | undefined;
+        const result = this.engine.compile(spec, variables);
+        return {
+            script: result.script,
+            script_filename: result.scriptFilename,
+            files: result.files.map(f => ({ name: f.name, content: f.content })),
+            warnings: result.warnings,
+        };
     }
 }

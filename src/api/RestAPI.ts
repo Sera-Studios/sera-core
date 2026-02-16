@@ -476,21 +476,24 @@ export class RestAPI {
             }
         });
 
-        // Resolve HITL approval
-        this.router.post('/api/pipelines/runs/:runId/hitl/:nodeId', (req: Request, res: Response) => {
-            const { runId, nodeId } = req.params;
-            const { approved } = req.body;
-
-            if (typeof approved !== 'boolean') {
-                res.status(400).json({ error: 'approved (boolean) is required' });
+        // Compile a pipeline spec (preview generated code without executing)
+        this.router.post('/api/pipelines/compile', (req: Request, res: Response) => {
+            const { spec, variables } = req.body;
+            if (!spec) {
+                res.status(400).json({ error: 'spec is required' });
                 return;
             }
 
-            const resolved = this.pipelineEngine.resolveHITL(runId, nodeId, approved);
-            if (resolved) {
-                res.json({ runId, nodeId, approved, resolved: true });
-            } else {
-                res.status(404).json({ error: 'No pending HITL approval found for this node' });
+            try {
+                const result = this.pipelineEngine.compile(spec as PipelineSpec, variables);
+                res.json({
+                    script: result.script,
+                    scriptFilename: result.scriptFilename,
+                    files: result.files,
+                    warnings: result.warnings,
+                });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
             }
         });
 
