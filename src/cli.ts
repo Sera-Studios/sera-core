@@ -49,6 +49,9 @@ async function main(): Promise<void> {
         case 'migrate':
             await migrateWorkspace(args[1]);
             break;
+        case 'build':
+            await buildPipeline(args.slice(1));
+            break;
         default:
             printUsage();
             break;
@@ -232,6 +235,79 @@ async function migrateWorkspace(workspacePath?: string): Promise<void> {
     console.log(`  Backup:   ${backupPath}`);
 }
 
+async function buildPipeline(args: string[]): Promise<void> {
+    let specPath: string | undefined;
+    let tag: string | undefined;
+    let format: string = 'docker';
+    let dryRun = false;
+    let push = false;
+    let outputDir: string | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+        switch (args[i]) {
+            case '--spec':
+                specPath = args[++i];
+                break;
+            case '--tag':
+                tag = args[++i];
+                break;
+            case '--format':
+                format = args[++i];
+                break;
+            case '--dry-run':
+                dryRun = true;
+                break;
+            case '--push':
+                push = true;
+                break;
+            case '--output':
+                outputDir = args[++i];
+                break;
+        }
+    }
+
+    if (!specPath) {
+        console.error('Usage: sera-core build --spec <path> [--tag <tag>] [--format docker|process|script] [--dry-run] [--push] [--output <dir>]');
+        process.exit(1);
+    }
+
+    const resolved = path.resolve(specPath);
+    if (!fs.existsSync(resolved)) {
+        console.error(`Pipeline spec not found: ${resolved}`);
+        process.exit(1);
+    }
+
+    const spec = JSON.parse(fs.readFileSync(resolved, 'utf-8'));
+
+    const { build } = await import('./packaging/BuildPipeline');
+    const result = await build(spec, {
+        tag,
+        format: format as 'docker' | 'process' | 'script',
+        dryRun,
+        push,
+        outputDir,
+    });
+
+    if (result.success) {
+        console.log('\nBuild succeeded');
+        if (result.imageTag) console.log(`  Image: ${result.imageTag}`);
+        if (result.artifactPath) console.log(`  Artifacts: ${result.artifactPath}`);
+    } else {
+        console.error('\nBuild failed');
+        for (const w of result.warnings) {
+            console.error(`  ${w}`);
+        }
+        process.exit(1);
+    }
+
+    if (result.warnings.length > 0) {
+        console.log('Warnings:');
+        for (const w of result.warnings) {
+            console.log(`  ${w}`);
+        }
+    }
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -284,6 +360,13 @@ function printUsage(): void {
     console.log('  list               List all audits with metadata');
     console.log('  health             Show health check JSON');
     console.log('  migrate <path>     Migrate workspace database to sera-core');
+    console.log('  build              Build a packaged pipeline');
+    console.log('    --spec <path>    Path to pipeline spec JSON (required)');
+    console.log('    --tag <tag>      Docker image tag');
+    console.log('    --format <fmt>   Output format: docker|process|script (default: docker)');
+    console.log('    --dry-run        Generate files without building');
+    console.log('    --push           Push Docker image after build');
+    console.log('    --output <dir>   Output directory for build artifacts');
 }
 
 main().catch((err) => {
