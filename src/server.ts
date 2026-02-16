@@ -24,6 +24,16 @@ import { QuizHandler } from './mcp/handlers/QuizHandler';
 import { TestCoverageHandler } from './mcp/handlers/TestCoverageHandler';
 import { NotepadHandler } from './mcp/handlers/NotepadHandler';
 import { StatsHandler } from './mcp/handlers/StatsHandler';
+import { TraceHandler } from './mcp/handlers/TraceHandler';
+import { AgentHandler } from './mcp/handlers/AgentHandler';
+import { AgentDefinitionLoader } from './agents/AgentDefinitionLoader';
+import { AgentLifecycleManager } from './agents/AgentLifecycleManager';
+import { AgentRegistrationStore } from './agents/AgentRegistrationStore';
+import { AdapterRegistry } from './agents/adapters/AdapterRegistry';
+import { ClaudeCodeAdapter } from './agents/adapters/ClaudeCodeAdapter';
+import { DockerAdapter } from './agents/adapters/DockerAdapter';
+import { ProcessAdapter } from './agents/adapters/ProcessAdapter';
+import { ScriptAdapter } from './agents/adapters/ScriptAdapter';
 
 export class SeraCore {
     private config: SeraConfig;
@@ -34,6 +44,10 @@ export class SeraCore {
     private restApi: RestAPI;
     private mcpServer: MCPServer;
     private server!: http.Server;
+    private agentLoader: AgentDefinitionLoader;
+    private agentManager: AgentLifecycleManager;
+    private registrationStore: AgentRegistrationStore;
+    private adapterRegistry: AdapterRegistry;
 
     constructor() {
         ensureSeraHome();
@@ -45,8 +59,24 @@ export class SeraCore {
         this.dbManager = new DatabaseManager(this.registry, this.config.database.flushIntervalMs);
         this.bridge = new EventBridge();
 
+        // Initialize agent infrastructure
+        this.agentLoader = new AgentDefinitionLoader();
+        this.registrationStore = new AgentRegistrationStore();
+        this.adapterRegistry = new AdapterRegistry();
+        this.adapterRegistry.register(new ClaudeCodeAdapter(this.agentLoader, this.config.ports.mcp));
+        this.adapterRegistry.register(new DockerAdapter());
+        this.adapterRegistry.register(new ProcessAdapter());
+        this.adapterRegistry.register(new ScriptAdapter());
+        this.agentManager = new AgentLifecycleManager(
+            this.adapterRegistry, this.registrationStore, this.config.ports.mcp
+        );
+
         this.wsApi = new WebSocketAPI(this.dbManager, this.registry, this.bridge);
-        this.restApi = new RestAPI(this.registry, this.dbManager, () => this.wsApi.getClientCount());
+        this.restApi = new RestAPI(
+            this.registry, this.dbManager,
+            () => this.wsApi.getClientCount(),
+            this.agentManager, this.agentLoader, this.registrationStore
+        );
 
         // Initialize MCP server with handlers
         this.mcpServer = new MCPServer(this.dbManager, this.registry, this.bridge);
@@ -64,6 +94,8 @@ export class SeraCore {
         this.mcpServer.registerHandler(new TestCoverageHandler());
         this.mcpServer.registerHandler(new NotepadHandler());
         this.mcpServer.registerHandler(new StatsHandler());
+        this.mcpServer.registerHandler(new TraceHandler());
+        this.mcpServer.registerHandler(new AgentHandler(this.agentManager, this.registrationStore));
 
         console.log('[sera-core] MCP handlers registered');
     }
@@ -105,6 +137,9 @@ export class SeraCore {
      */
     async stop(): Promise<void> {
         console.log('[sera-core] Shutting down...');
+
+        // Stop all running agents
+        await this.agentManager.stopAll();
 
         // Stop MCP server
         await this.mcpServer.stop();

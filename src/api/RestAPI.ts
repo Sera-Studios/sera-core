@@ -9,7 +9,10 @@
 import { Router, Request, Response } from 'express';
 import { AuditRegistry } from '../database/AuditRegistry';
 import { DatabaseManager } from '../database/DatabaseManager';
-import { HealthResponse } from '@sera/types';
+import { HealthResponse, AgentRegistration } from '@sera/types';
+import { AgentLifecycleManager } from '../agents/AgentLifecycleManager';
+import { AgentDefinitionLoader } from '../agents/AgentDefinitionLoader';
+import { AgentRegistrationStore } from '../agents/AgentRegistrationStore';
 
 export class RestAPI {
     private router: Router;
@@ -17,17 +20,26 @@ export class RestAPI {
     private dbManager: DatabaseManager;
     private startTime: number;
     private getClientCount: () => number;
+    private agentManager: AgentLifecycleManager;
+    private agentLoader: AgentDefinitionLoader;
+    private registrationStore: AgentRegistrationStore;
 
     constructor(
         registry: AuditRegistry,
         dbManager: DatabaseManager,
-        getClientCount: () => number
+        getClientCount: () => number,
+        agentManager: AgentLifecycleManager,
+        agentLoader: AgentDefinitionLoader,
+        registrationStore: AgentRegistrationStore
     ) {
         this.router = Router();
         this.registry = registry;
         this.dbManager = dbManager;
         this.startTime = Date.now();
         this.getClientCount = getClientCount;
+        this.agentManager = agentManager;
+        this.agentLoader = agentLoader;
+        this.registrationStore = registrationStore;
         this.setupRoutes();
     }
 
@@ -143,6 +155,200 @@ export class RestAPI {
             } catch (err) {
                 res.status(500).json({ error: String(err) });
             }
+        });
+
+        // ====================================================================
+        // Agent management endpoints
+        // ====================================================================
+
+        // Reload agent definitions from disk
+        this.router.post('/api/agents/definitions/reload', (_req: Request, res: Response) => {
+            this.agentLoader.reload();
+            const definitions = this.agentLoader.getAll();
+            res.json({ reloaded: definitions.length });
+        });
+
+        // List available agent definitions
+        this.router.get('/api/agents/definitions', (_req: Request, res: Response) => {
+            const definitions = this.agentLoader.getAll();
+            res.json({
+                definitions: definitions.map(d => ({
+                    id: d.id,
+                    name: d.name,
+                    description: d.description,
+                    capabilities: d.capabilities,
+                    defaultTimeout: d.defaultTimeout,
+                    toolsCount: d.defaultTools.allowed.length,
+                    defaultScope: d.defaultScope,
+                })),
+            });
+        });
+
+        // Get single agent definition
+        this.router.get('/api/agents/definitions/:id', (req: Request, res: Response) => {
+            const def = this.agentLoader.getDefinition(req.params.id);
+            if (!def) {
+                res.status(404).json({ error: 'Agent definition not found' });
+                return;
+            }
+            res.json(def);
+        });
+
+        // List agent instances
+        this.router.get('/api/agents/instances', (req: Request, res: Response) => {
+            const auditSlug = req.query.audit as string | undefined;
+            const instances = this.agentManager.listInstances(auditSlug);
+            res.json({
+                instances,
+                total: instances.length,
+                running: instances.filter(i => i.status === 'running').length,
+            });
+        });
+
+        // Get agent instance status
+        this.router.get('/api/agents/instances/:id', (req: Request, res: Response) => {
+            const instance = this.agentManager.getStatus(req.params.id);
+            if (!instance) {
+                res.status(404).json({ error: 'Agent instance not found' });
+                return;
+            }
+            res.json(instance);
+        });
+
+        // Launch agent
+        this.router.post('/api/agents/launch', async (req: Request, res: Response) => {
+            const { definitionId, auditSlug, workspacePath, primerPath, customPrompt, timeout, scopeOverrides } = req.body;
+
+            if (!definitionId || !auditSlug || !workspacePath) {
+                res.status(400).json({ error: 'definitionId, auditSlug, and workspacePath are required' });
+                return;
+            }
+
+            try {
+                const instance = await this.agentManager.launch({
+                    definitionId,
+                    auditSlug,
+                    workspacePath,
+                    primerPath,
+                    customPrompt,
+                    timeout,
+                    scopeOverrides,
+                });
+                res.status(201).json(instance);
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Stop agent
+        this.router.post('/api/agents/instances/:id/stop', async (req: Request, res: Response) => {
+            try {
+                await this.agentManager.stop(req.params.id);
+                const instance = this.agentManager.getStatus(req.params.id);
+                res.json(instance || { status: 'stopped' });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Get agent instance outputs
+        this.router.get('/api/agents/instances/:id/outputs', async (req: Request, res: Response) => {
+            try {
+                const outputs = await this.agentManager.getOutputs(req.params.id);
+                if (!outputs) {
+                    res.status(404).json({ error: 'Agent instance not found' });
+                    return;
+                }
+                res.json(outputs);
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // ====================================================================
+        // Agent registration endpoints (new format)
+        // ====================================================================
+
+        // List all registrations
+        this.router.get('/api/agents/registrations', (_req: Request, res: Response) => {
+            const registrations = this.registrationStore.getAll();
+            res.json({
+                registrations: registrations.map(r => ({
+                    id: r.id,
+                    name: r.name,
+                    description: r.description,
+                    executionType: r.execution.type,
+                    defaultTimeout: r.defaultTimeout,
+                    inputCount: r.interface.inputs.length,
+                    outputCount: r.interface.outputs.length,
+                })),
+                total: registrations.length,
+            });
+        });
+
+        // Get single registration
+        this.router.get('/api/agents/registrations/:id', (req: Request, res: Response) => {
+            const reg = this.registrationStore.get(req.params.id);
+            if (!reg) {
+                res.status(404).json({ error: 'Agent registration not found' });
+                return;
+            }
+            res.json(reg);
+        });
+
+        // Register new agent
+        this.router.post('/api/agents/registrations', (req: Request, res: Response) => {
+            const registration = req.body as AgentRegistration;
+            if (!registration.id || !registration.name || !registration.execution) {
+                res.status(400).json({ error: 'id, name, and execution are required' });
+                return;
+            }
+
+            const persist = req.query.persist === 'true';
+            this.registrationStore.register(registration, persist);
+            res.status(201).json({ registered: registration.id });
+        });
+
+        // Unregister agent
+        this.router.delete('/api/agents/registrations/:id', (req: Request, res: Response) => {
+            const removed = this.registrationStore.unregister(req.params.id);
+            if (!removed) {
+                res.status(404).json({ error: 'Agent registration not found' });
+                return;
+            }
+            res.json({ unregistered: req.params.id });
+        });
+
+        // Validate a registration (pre-flight check)
+        this.router.post('/api/agents/registrations/:id/validate', async (req: Request, res: Response) => {
+            const reg = this.registrationStore.get(req.params.id);
+            if (!reg) {
+                res.status(404).json({ error: 'Agent registration not found' });
+                return;
+            }
+
+            try {
+                const handle = this.agentManager.getHandle(req.params.id);
+                res.json({
+                    id: reg.id,
+                    executionType: reg.execution.type,
+                    valid: true,
+                    handle: handle ? { status: handle.status } : null,
+                });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // Reload registrations from disk
+        this.router.post('/api/agents/registrations/reload', (_req: Request, res: Response) => {
+            this.registrationStore.reload();
+            res.json({ reloaded: this.registrationStore.size });
+        });
+
+        // List available adapter types
+        this.router.get('/api/agents/adapters', (_req: Request, res: Response) => {
+            res.json({ message: 'Use GET /api/agents/registrations for available agents' });
         });
     }
 }
