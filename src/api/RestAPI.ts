@@ -14,6 +14,7 @@ import { AgentLifecycleManager } from '../agents/AgentLifecycleManager';
 import { AgentDefinitionLoader } from '../agents/AgentDefinitionLoader';
 import { AgentRegistrationStore } from '../agents/AgentRegistrationStore';
 import { PipelineEngine } from '../pipeline/PipelineEngine';
+import { CredentialStore } from '../credentials/CredentialStore';
 
 export class RestAPI {
     private router: Router;
@@ -25,6 +26,7 @@ export class RestAPI {
     private agentLoader: AgentDefinitionLoader;
     private registrationStore: AgentRegistrationStore;
     private pipelineEngine: PipelineEngine;
+    private credentialStore: CredentialStore;
 
     constructor(
         registry: AuditRegistry,
@@ -33,7 +35,8 @@ export class RestAPI {
         agentManager: AgentLifecycleManager,
         agentLoader: AgentDefinitionLoader,
         registrationStore: AgentRegistrationStore,
-        pipelineEngine: PipelineEngine
+        pipelineEngine: PipelineEngine,
+        credentialStore: CredentialStore
     ) {
         this.router = Router();
         this.registry = registry;
@@ -44,6 +47,7 @@ export class RestAPI {
         this.agentLoader = agentLoader;
         this.registrationStore = registrationStore;
         this.pipelineEngine = pipelineEngine;
+        this.credentialStore = credentialStore;
         this.setupRoutes();
     }
 
@@ -546,6 +550,43 @@ export class RestAPI {
                 res.json(spec);
             } catch (err) {
                 res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // ====================================================================
+        // Credential endpoints
+        // ====================================================================
+
+        // List credentials (masked keys only)
+        this.router.get('/api/credentials', (req: Request, res: Response) => {
+            const provider = req.query.provider as string | undefined;
+            res.json({ credentials: this.credentialStore.list(provider) });
+        });
+
+        // Add a credential
+        this.router.post('/api/credentials', (req: Request, res: Response) => {
+            const { provider, name, apiKey } = req.body;
+            if (!provider || !name || !apiKey) {
+                res.status(400).json({ error: 'provider, name, and apiKey are required' });
+                return;
+            }
+            const credential = this.credentialStore.save(provider, name, apiKey);
+            res.status(201).json({
+                id: credential.id,
+                provider: credential.provider,
+                name: credential.name,
+                maskedKey: '****' + apiKey.slice(-4),
+                createdAt: credential.createdAt,
+            });
+        });
+
+        // Delete a credential
+        this.router.delete('/api/credentials/:id', (req: Request, res: Response) => {
+            const removed = this.credentialStore.remove(req.params.id);
+            if (removed) {
+                res.json({ deleted: true });
+            } else {
+                res.status(404).json({ error: 'Credential not found' });
             }
         });
     }

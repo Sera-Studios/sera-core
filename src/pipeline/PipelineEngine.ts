@@ -22,6 +22,7 @@ import type {
 import { PipelinePersistence } from './PipelinePersistence';
 import { CompilerRegistry } from '../compiler/CompilerRegistry';
 import type { EventBridge } from '../events/EventBridge';
+import type { CredentialStore } from '../credentials/CredentialStore';
 
 interface ActiveRun {
     run: PipelineRun;
@@ -37,16 +38,19 @@ export class PipelineEngine {
     private persistence: PipelinePersistence;
     private compilerRegistry: CompilerRegistry;
     private bridge: EventBridge;
+    private credentialStore: CredentialStore;
     private activeRuns: Map<string, ActiveRun> = new Map();
 
     constructor(
         persistence: PipelinePersistence,
         compilerRegistry: CompilerRegistry,
-        bridge: EventBridge
+        bridge: EventBridge,
+        credentialStore: CredentialStore
     ) {
         this.persistence = persistence;
         this.compilerRegistry = compilerRegistry;
         this.bridge = bridge;
+        this.credentialStore = credentialStore;
     }
 
     /**
@@ -131,6 +135,19 @@ export class PipelineEngine {
             WORKSPACE_PATH: workspacePath ?? '',
             AUDIT_SLUG: auditSlug,
         };
+
+        // Inject API key from credential store
+        const credentialId = spec.execution?.credentialId as string | undefined;
+        if (credentialId) {
+            const cred = this.credentialStore.get(credentialId);
+            if (cred) env.ANTHROPIC_API_KEY = cred.apiKey;
+        } else {
+            // Fall back to first available Anthropic credential
+            const anthropicCreds = this.credentialStore.getByProvider('anthropic');
+            if (anthropicCreds.length > 0) {
+                env.ANTHROPIC_API_KEY = anthropicCreds[0].apiKey;
+            }
+        }
 
         // Set pipeline variables as env vars
         for (const [key, value] of Object.entries(run.variables)) {

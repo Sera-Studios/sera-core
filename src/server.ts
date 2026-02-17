@@ -39,6 +39,7 @@ import { PipelineEngine } from './pipeline/PipelineEngine';
 import { PipelinePersistence } from './pipeline/PipelinePersistence';
 import { CompilerRegistry } from './compiler/CompilerRegistry';
 import { PydanticAICompiler } from './compiler/PydanticAICompiler';
+import { CredentialStore } from './credentials/CredentialStore';
 
 export class SeraCore {
     private config: SeraConfig;
@@ -81,10 +82,13 @@ export class SeraCore {
         const compilerRegistry = new CompilerRegistry();
         compilerRegistry.register(new PydanticAICompiler());
 
+        // Initialize credential store
+        const credentialStore = new CredentialStore();
+
         // Initialize pipeline engine
         const pipelinePersistence = new PipelinePersistence(this.dbManager);
         this.pipelineEngine = new PipelineEngine(
-            pipelinePersistence, compilerRegistry, this.bridge
+            pipelinePersistence, compilerRegistry, this.bridge, credentialStore
         );
 
         this.wsApi = new WebSocketAPI(this.dbManager, this.registry, this.bridge);
@@ -92,7 +96,7 @@ export class SeraCore {
             this.registry, this.dbManager,
             () => this.wsApi.getClientCount(),
             this.agentManager, this.agentLoader, this.registrationStore,
-            this.pipelineEngine
+            this.pipelineEngine, credentialStore
         );
 
         // Initialize MCP server with handlers
