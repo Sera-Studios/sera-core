@@ -152,6 +152,14 @@ export class PydanticAICompiler implements PipelineCompiler {
         lines.push(`# Pipeline: ${pyStr(spec.name)} v${spec.version}`);
         lines.push('');
 
+        // Detect which runtimes are used
+        const agentNodes = spec.nodes.filter(n => n.type === 'llm-agent');
+        const hasClaudeCode = agentNodes.some(n => (n.config.runtime as string) === 'claude-code');
+        const hasPydanticAI = agentNodes.some(n => {
+            const rt = (n.config.runtime as string) || 'pydantic-ai';
+            return rt === 'pydantic-ai';
+        });
+
         // Imports
         lines.push('import asyncio');
         lines.push('import json');
@@ -161,7 +169,12 @@ export class PydanticAICompiler implements PipelineCompiler {
         lines.push('import sys');
         lines.push('from pathlib import Path');
         lines.push('');
-        lines.push('from pydantic_ai import Agent');
+        if (hasPydanticAI) {
+            lines.push('from pydantic_ai import Agent');
+        }
+        if (hasClaudeCode) {
+            lines.push('from claude_agent_sdk import query, ClaudeAgentOptions');
+        }
         lines.push('');
 
         // Event helper
@@ -219,25 +232,67 @@ export class PydanticAICompiler implements PipelineCompiler {
         lines.push('');
 
         // Generate agent declarations for llm-agent nodes
-        const agentNodes = spec.nodes.filter(n => n.type === 'llm-agent');
         if (agentNodes.length > 0) {
+            // Claude Code helper function (shared by all claude-code nodes)
+            if (hasClaudeCode) {
+                lines.push('# --- Claude Code Agent Helper ---');
+                lines.push('async def _run_claude_code(prompt, system_prompt, model=None, cwd=None, tools=None):');
+                lines.push('    """Spawn a Claude Code agent via the SDK."""');
+                lines.push('    opts = {');
+                lines.push("        'system_prompt': system_prompt,");
+                lines.push("        'permission_mode': 'bypassPermissions',");
+                lines.push("        'allowed_tools': tools or ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],");
+                lines.push('    }');
+                lines.push('    if model:');
+                lines.push("        opts['model'] = model");
+                lines.push('    if cwd:');
+                lines.push("        opts['cwd'] = cwd");
+                lines.push('    options = ClaudeAgentOptions(**opts)');
+                lines.push('    result_text = ""');
+                lines.push('    async for message in query(prompt=prompt, options=options):');
+                lines.push("        if hasattr(message, 'result') and message.result:");
+                lines.push('            result_text = message.result');
+                lines.push('    return result_text');
+                lines.push('');
+            }
+
             lines.push('# --- Agents ---');
             for (const node of agentNodes) {
-                const model = (node.config.model as string) || 'anthropic:claude-sonnet-4-5-20250929';
+                const runtime = (node.config.runtime as string) || 'pydantic-ai';
+                const model = (node.config.model as string) || '';
                 const systemPrompt = (node.config.systemPrompt as string) || '';
                 const roleFile = (node.config.roleFile as string) || '';
 
-                const agentVar = `agent_${pyId(node.id)}`;
-
-                if (roleFile) {
-                    // Load system prompt from role file at runtime
-                    lines.push(`_role_path_${pyId(node.id)} = Path(__file__).parent / 'roles' / '${pyStr(roleFile)}'`);
-                    lines.push(`_system_prompt_${pyId(node.id)} = _role_path_${pyId(node.id)}.read_text() if _role_path_${pyId(node.id)}.exists() else '${pyStr(systemPrompt)}'`);
-                    lines.push(`${agentVar} = Agent('${pyStr(model)}', system_prompt=_system_prompt_${pyId(node.id)})`);
-                } else if (systemPrompt) {
-                    lines.push(`${agentVar} = Agent('${pyStr(model)}', system_prompt='${pyStr(systemPrompt)}')`);
+                if (runtime === 'claude-code') {
+                    // Claude Code agents use the SDK helper - store config for use in node function
+                    const promptVar = `_system_prompt_${pyId(node.id)}`;
+                    if (roleFile) {
+                        lines.push(`_role_path_${pyId(node.id)} = Path(__file__).parent / 'roles' / '${pyStr(roleFile)}'`);
+                        lines.push(`${promptVar} = _role_path_${pyId(node.id)}.read_text() if _role_path_${pyId(node.id)}.exists() else '${pyStr(systemPrompt)}'`);
+                    } else {
+                        lines.push(`${promptVar} = '${pyStr(systemPrompt)}'`);
+                    }
+                    if (model) {
+                        lines.push(`_model_${pyId(node.id)} = '${pyStr(model)}'`);
+                    } else {
+                        lines.push(`_model_${pyId(node.id)} = None`);
+                    }
                 } else {
-                    lines.push(`${agentVar} = Agent('${pyStr(model)}')`);
+                    // PydanticAI Agent - add anthropic: prefix if not already present
+                    const pydanticModel = model
+                        ? (model.includes(':') ? model : `anthropic:${model}`)
+                        : 'anthropic:claude-sonnet-4-5-20250929';
+                    const agentVar = `agent_${pyId(node.id)}`;
+
+                    if (roleFile) {
+                        lines.push(`_role_path_${pyId(node.id)} = Path(__file__).parent / 'roles' / '${pyStr(roleFile)}'`);
+                        lines.push(`_system_prompt_${pyId(node.id)} = _role_path_${pyId(node.id)}.read_text() if _role_path_${pyId(node.id)}.exists() else '${pyStr(systemPrompt)}'`);
+                        lines.push(`${agentVar} = Agent('${pyStr(pydanticModel)}', system_prompt=_system_prompt_${pyId(node.id)})`);
+                    } else if (systemPrompt) {
+                        lines.push(`${agentVar} = Agent('${pyStr(pydanticModel)}', system_prompt='${pyStr(systemPrompt)}')`);
+                    } else {
+                        lines.push(`${agentVar} = Agent('${pyStr(pydanticModel)}')`);
+                    }
                 }
             }
             lines.push('');
@@ -271,9 +326,9 @@ export class PydanticAICompiler implements PipelineCompiler {
         lines.push('');
 
         // Generate requirements.txt
-        const requirements = [
-            'pydantic-ai>=0.1.0',
-        ];
+        const requirements: string[] = [];
+        if (hasPydanticAI) requirements.push('pydantic-ai>=0.1.0');
+        if (hasClaudeCode) requirements.push('claude-agent-sdk>=0.1.0');
 
         return {
             script: lines.join('\n'),
@@ -344,15 +399,33 @@ export class PydanticAICompiler implements PipelineCompiler {
                 break;
 
             case 'llm-agent': {
-                const agentVar = `agent_${pyId(node.id)}`;
+                const runtime = (node.config.runtime as string) || 'pydantic-ai';
                 const timeout = (node.config.timeout as number) || 10800;
                 lines.push(`async def ${fnName}(inputs):`);
                 lines.push(`    """llm-agent: ${pyStr(node.name)}"""`);
                 lines.push(`    emit('node:started', '${pyStr(node.id)}')`);
                 lines.push(`    await check_pause()`);
                 lines.push(`    prompt = json.dumps(inputs) if isinstance(inputs, dict) else str(inputs)`);
-                lines.push(`    result = await asyncio.wait_for(${agentVar}.run(prompt), timeout=${timeout})`);
-                lines.push(`    output = {'type': 'agent-output', 'data': result.data}`);
+
+                if (runtime === 'claude-code') {
+                    // Use Claude Agent SDK
+                    const availableTools = (node.config.availableTools as string[]) || [];
+                    const toolsArg = availableTools.length > 0
+                        ? JSON.stringify(availableTools)
+                        : 'None';
+                    lines.push(`    workspace = os.environ.get('WORKSPACE_PATH', '.')`);
+                    lines.push(`    data = await asyncio.wait_for(`);
+                    lines.push(`        _run_claude_code(prompt, _system_prompt_${pyId(node.id)}, model=_model_${pyId(node.id)}, cwd=workspace, tools=${toolsArg}),`);
+                    lines.push(`        timeout=${timeout}`);
+                    lines.push(`    )`);
+                } else {
+                    // PydanticAI Agent
+                    const agentVar = `agent_${pyId(node.id)}`;
+                    lines.push(`    result = await asyncio.wait_for(${agentVar}.run(prompt), timeout=${timeout})`);
+                    lines.push(`    data = result.data`);
+                }
+
+                lines.push(`    output = {'type': 'agent-output', 'data': data}`);
                 lines.push(`    emit('node:completed', '${pyStr(node.id)}')`);
                 lines.push(`    return output`);
                 break;
