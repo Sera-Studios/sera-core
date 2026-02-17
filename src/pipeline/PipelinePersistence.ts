@@ -24,9 +24,9 @@ export const PIPELINE_TABLE_SCHEMAS: TableSchema[] = [
         name: 'pipeline_runs',
         fields: [
             { name: 'id', type: 'TEXT' as const, required: true, primaryKey: true },
-            { name: 'pipelineId', type: 'TEXT' as const, required: true },
-            { name: 'pipelineSpecVersion', type: 'TEXT' as const, required: true },
-            { name: 'auditSlug', type: 'TEXT' as const, required: true },
+            { name: 'pipelineId', type: 'TEXT' as const, required: false },
+            { name: 'pipelineSpecVersion', type: 'TEXT' as const, required: false },
+            { name: 'auditSlug', type: 'TEXT' as const, required: false },
             { name: 'state', type: 'TEXT' as const, required: true },
             { name: 'variables', type: 'TEXT' as const, required: false },
             { name: 'concurrency', type: 'TEXT' as const, required: false },
