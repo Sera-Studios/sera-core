@@ -55,30 +55,6 @@ const SESSIONBRIDGE_SCHEMAS: TableSchema[] = [
         indexes: [{ fields: ['source'] }, { fields: ['timestamp'] }],
     },
     {
-        name: 'submitted_issues',
-        fields: [
-            { name: 'id', type: 'INTEGER', primaryKey: true, required: true },
-            { name: 'issueId', type: 'TEXT', required: true },
-            { name: 'sessionId', type: 'TEXT', required: true },
-            { name: 'title', type: 'TEXT', required: true },
-            { name: 'severity', type: 'TEXT', required: true },
-            { name: 'description', type: 'TEXT', required: true },
-            { name: 'location', type: 'TEXT', required: true },
-            { name: 'attackScenario', type: 'TEXT', required: false },
-            { name: 'recommendation', type: 'TEXT', required: false },
-            { name: 'createdAt', type: 'TEXT', required: true },
-            { name: 'status', type: 'TEXT', required: true, defaultValue: 'pending' },
-            { name: 'auditorResponse', type: 'TEXT', required: false },
-            { name: 'updatedSeverity', type: 'TEXT', required: false },
-        ],
-        indexes: [
-            { fields: ['issueId'], unique: true },
-            { fields: ['sessionId'] },
-            { fields: ['severity'] },
-            { fields: ['status'] },
-        ],
-    },
-    {
         name: 'visualizations',
         fields: [
             { name: 'id', type: 'INTEGER', primaryKey: true, required: true },
@@ -161,31 +137,6 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
         },
     },
     {
-        name: 'submit_issue',
-        description: 'Submit a potential security issue for auditor triage.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                title: { type: 'string' },
-                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'] },
-                description: { type: 'string' },
-                location: {
-                    type: 'object',
-                    properties: { file: { type: 'string' }, start_line: { type: 'number' }, end_line: { type: 'number' } },
-                    required: ['file', 'start_line', 'end_line'],
-                },
-                attack_scenario: { type: 'string' },
-                recommendation: { type: 'string' },
-            },
-            required: ['title', 'severity', 'description', 'location'],
-        },
-    },
-    {
-        name: 'get_triage_responses',
-        description: 'Check if auditor has responded to submitted issues.',
-        inputSchema: { type: 'object', properties: {}, required: [] },
-    },
-    {
         name: 'submit_contract_map',
         description: 'Submit a contract relationship visualization.',
         inputSchema: {
@@ -243,10 +194,6 @@ export class CoreHandler implements PortableMcpHandler {
                 return this.handleLogConversation(args, ctx);
             case 'log_prompt':
                 return this.handleLogPrompt(args, ctx);
-            case 'submit_issue':
-                return this.handleSubmitIssue(args, ctx);
-            case 'get_triage_responses':
-                return this.handleGetTriageResponses(ctx);
             case 'submit_contract_map':
                 return this.handleSubmitContractMap(args, ctx);
             case 'submit_flow_diagram':
@@ -338,41 +285,6 @@ export class CoreHandler implements PortableMcpHandler {
 
         console.log(`[CoreHandler] Prompt logged: ${promptId} (${args.agent_type})`);
         return promptId;
-    }
-
-    private async handleSubmitIssue(args: Record<string, unknown>, ctx: HandlerContext): Promise<{ issue_id: string }> {
-        const issueId = `issue_${Date.now()}`;
-        const location = args.location as Record<string, unknown>;
-
-        await ctx.db.write('sessionbridge', 'submitted_issues', {
-            id: Date.now(),
-            issueId,
-            sessionId: ctx.sessionId,
-            title: args.title as string,
-            severity: args.severity as string,
-            description: args.description as string,
-            location: JSON.stringify(location),
-            attackScenario: (args.attack_scenario as string) || null,
-            recommendation: (args.recommendation as string) || null,
-            createdAt: new Date().toISOString(),
-            status: 'pending',
-        });
-
-        console.log(`[CoreHandler] Issue submitted: ${issueId} - [${args.severity}] ${args.title}`);
-        return { issue_id: issueId };
-    }
-
-    private async handleGetTriageResponses(ctx: HandlerContext): Promise<unknown[]> {
-        const responses = await ctx.db.sql(
-            `SELECT * FROM sessionbridge_submitted_issues WHERE sessionId = ? AND status != 'pending'`,
-            [ctx.sessionId]
-        );
-        return responses.map((r: any) => ({
-            issue_id: r.issueId,
-            response: r.auditorResponse || '',
-            status: r.status,
-            updated_severity: r.updatedSeverity,
-        }));
     }
 
     private async handleSubmitContractMap(args: Record<string, unknown>, ctx: HandlerContext): Promise<{ map_id: string }> {

@@ -10,7 +10,10 @@
     "compile": "tsc -p tsconfig.json",
     "watch": "tsc -watch -p tsconfig.json",
     "start": "node out/server.js",
-    "dev": "npm run compile && node out/server.js"
+    "dev": "npm run compile && node out/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@sera/types": "file:../../packages/sera-types",
@@ -23,6 +26,8 @@
     "@types/node": "^20.11.0",
     "@types/sql.js": "^1.4.9",
     "@types/ws": "^8.5.12",
-    "typescript": "^5.4.0"
+    "@vitest/coverage-v8": "^4.0.18",
+    "typescript": "^5.4.0",
+    "vitest": "^4.0.18"
   }
 }

@@ -6,15 +6,16 @@
  * Mounted on the same HTTP server as the WebSocket API (port 9800).
  */
 
+import * as path from 'path';
 import { Router, Request, Response } from 'express';
 import { AuditRegistry } from '../database/AuditRegistry';
 import { DatabaseManager } from '../database/DatabaseManager';
-import { HealthResponse, AgentRegistration, PipelineSpec } from '@sera/types';
-import { AgentLifecycleManager } from '../agents/AgentLifecycleManager';
-import { AgentDefinitionLoader } from '../agents/AgentDefinitionLoader';
+import { HealthResponse, AgentRegistration } from '@sera/types';
 import { AgentRegistrationStore } from '../agents/AgentRegistrationStore';
-import { PipelineEngine } from '../pipeline/PipelineEngine';
 import { CredentialStore } from '../credentials/CredentialStore';
+import { BenchmarkStore } from '../benchmark/BenchmarkStore';
+import { AgentExecutor } from '../execution/AgentExecutor';
+import { importSherlockIndex } from '../benchmark/importSherlock';
 
 export class RestAPI {
     private router: Router;
@@ -22,32 +23,29 @@ export class RestAPI {
     private dbManager: DatabaseManager;
     private startTime: number;
     private getClientCount: () => number;
-    private agentManager: AgentLifecycleManager;
-    private agentLoader: AgentDefinitionLoader;
     private registrationStore: AgentRegistrationStore;
-    private pipelineEngine: PipelineEngine;
     private credentialStore: CredentialStore;
+    private benchmarkStore?: BenchmarkStore;
+    private agentExecutor?: AgentExecutor;
 
     constructor(
         registry: AuditRegistry,
         dbManager: DatabaseManager,
         getClientCount: () => number,
-        agentManager: AgentLifecycleManager,
-        agentLoader: AgentDefinitionLoader,
         registrationStore: AgentRegistrationStore,
-        pipelineEngine: PipelineEngine,
-        credentialStore: CredentialStore
+        credentialStore: CredentialStore,
+        benchmarkStore?: BenchmarkStore,
+        agentExecutor?: AgentExecutor,
     ) {
         this.router = Router();
         this.registry = registry;
         this.dbManager = dbManager;
         this.startTime = Date.now();
         this.getClientCount = getClientCount;
-        this.agentManager = agentManager;
-        this.agentLoader = agentLoader;
         this.registrationStore = registrationStore;
-        this.pipelineEngine = pipelineEngine;
         this.credentialStore = credentialStore;
+        this.benchmarkStore = benchmarkStore;
+        this.agentExecutor = agentExecutor;
         this.setupRoutes();
     }
 
@@ -166,115 +164,7 @@ export class RestAPI {
         });
 
         // ====================================================================
-        // Agent management endpoints
-        // ====================================================================
-
-        // Reload agent definitions from disk
-        this.router.post('/api/agents/definitions/reload', (_req: Request, res: Response) => {
-            this.agentLoader.reload();
-            const definitions = this.agentLoader.getAll();
-            res.json({ reloaded: definitions.length });
-        });
-
-        // List available agent definitions
-        this.router.get('/api/agents/definitions', (_req: Request, res: Response) => {
-            const definitions = this.agentLoader.getAll();
-            res.json({
-                definitions: definitions.map(d => ({
-                    id: d.id,
-                    name: d.name,
-                    description: d.description,
-                    capabilities: d.capabilities,
-                    defaultTimeout: d.defaultTimeout,
-                    toolsCount: d.defaultTools.allowed.length,
-                    defaultScope: d.defaultScope,
-                })),
-            });
-        });
-
-        // Get single agent definition
-        this.router.get('/api/agents/definitions/:id', (req: Request, res: Response) => {
-            const def = this.agentLoader.getDefinition(req.params.id);
-            if (!def) {
-                res.status(404).json({ error: 'Agent definition not found' });
-                return;
-            }
-            res.json(def);
-        });
-
-        // List agent instances
-        this.router.get('/api/agents/instances', (req: Request, res: Response) => {
-            const auditSlug = req.query.audit as string | undefined;
-            const instances = this.agentManager.listInstances(auditSlug);
-            res.json({
-                instances,
-                total: instances.length,
-                running: instances.filter(i => i.status === 'running').length,
-            });
-        });
-
-        // Get agent instance status
-        this.router.get('/api/agents/instances/:id', (req: Request, res: Response) => {
-            const instance = this.agentManager.getStatus(req.params.id);
-            if (!instance) {
-                res.status(404).json({ error: 'Agent instance not found' });
-                return;
-            }
-            res.json(instance);
-        });
-
-        // Launch agent
-        this.router.post('/api/agents/launch', async (req: Request, res: Response) => {
-            const { definitionId, auditSlug, workspacePath, primerPath, customPrompt, timeout, scopeOverrides } = req.body;
-
-            if (!definitionId || !auditSlug || !workspacePath) {
-                res.status(400).json({ error: 'definitionId, auditSlug, and workspacePath are required' });
-                return;
-            }
-
-            try {
-                const instance = await this.agentManager.launch({
-                    definitionId,
-                    auditSlug,
-                    workspacePath,
-                    primerPath,
-                    customPrompt,
-                    timeout,
-                    scopeOverrides,
-                });
-                res.status(201).json(instance);
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Stop agent
-        this.router.post('/api/agents/instances/:id/stop', async (req: Request, res: Response) => {
-            try {
-                await this.agentManager.stop(req.params.id);
-                const instance = this.agentManager.getStatus(req.params.id);
-                res.json(instance || { status: 'stopped' });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Get agent instance outputs
-        this.router.get('/api/agents/instances/:id/outputs', async (req: Request, res: Response) => {
-            try {
-                const outputs = await this.agentManager.getOutputs(req.params.id);
-                if (!outputs) {
-                    res.status(404).json({ error: 'Agent instance not found' });
-                    return;
-                }
-                res.json(outputs);
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // ====================================================================
-        // Agent registration endpoints (new format)
+        // Agent registration endpoints
         // ====================================================================
 
         // List all registrations
@@ -284,6 +174,7 @@ export class RestAPI {
                 registrations: registrations.map(r => ({
                     id: r.id,
                     name: r.name,
+                    version: r.version,
                     description: r.description,
                     executionType: r.execution.type,
                     defaultTimeout: r.defaultTimeout,
@@ -306,13 +197,33 @@ export class RestAPI {
 
         // Register new agent
         this.router.post('/api/agents/registrations', (req: Request, res: Response) => {
-            const registration = req.body as AgentRegistration;
+            const { scriptContent, files: artifactFiles, persist: bodyPersist, ...regBody } = req.body;
+            const registration = regBody as AgentRegistration;
             if (!registration.id || !registration.name || !registration.execution) {
                 res.status(400).json({ error: 'id, name, and execution are required' });
                 return;
             }
 
-            const persist = req.query.persist === 'true';
+            const persist = req.query.persist === 'true'
+                || bodyPersist === true
+                || bodyPersist === 'true';
+
+            // Write script artifacts to disk when provided
+            if (persist && scriptContent && registration.execution.type === 'script') {
+                const artifacts: Array<{ name: string; content: string }> = [];
+                artifacts.push({ name: registration.execution.scriptPath, content: scriptContent });
+                if (Array.isArray(artifactFiles)) {
+                    for (const f of artifactFiles) {
+                        if (f.name && f.content) {
+                            artifacts.push({ name: f.name, content: f.content });
+                        }
+                    }
+                }
+                const artifactDir = this.registrationStore.writeArtifacts(registration.id, artifacts);
+                // Update scriptPath to absolute so the executor can find it
+                registration.execution.scriptPath = path.join(artifactDir, registration.execution.scriptPath);
+            }
+
             this.registrationStore.register(registration, persist);
             res.status(201).json({ registered: registration.id });
         });
@@ -327,230 +238,20 @@ export class RestAPI {
             res.json({ unregistered: req.params.id });
         });
 
-        // Validate a registration (pre-flight check)
-        this.router.post('/api/agents/registrations/:id/validate', async (req: Request, res: Response) => {
-            const reg = this.registrationStore.get(req.params.id);
-            if (!reg) {
-                res.status(404).json({ error: 'Agent registration not found' });
-                return;
-            }
-
-            try {
-                const handle = this.agentManager.getHandle(req.params.id);
-                res.json({
-                    id: reg.id,
-                    executionType: reg.execution.type,
-                    valid: true,
-                    handle: handle ? { status: handle.status } : null,
-                });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
         // Reload registrations from disk
         this.router.post('/api/agents/registrations/reload', (_req: Request, res: Response) => {
             this.registrationStore.reload();
             res.json({ reloaded: this.registrationStore.size });
         });
 
-        // List available adapter types
-        this.router.get('/api/agents/adapters', (_req: Request, res: Response) => {
-            res.json({ message: 'Use GET /api/agents/registrations for available agents' });
-        });
-
-        // ====================================================================
-        // Pipeline endpoints
-        // ====================================================================
-
-        // Execute a pipeline
-        this.router.post('/api/pipelines/execute', async (req: Request, res: Response) => {
-            const { spec, variables, auditSlug, workspacePath } = req.body;
-
-            if (!spec || !auditSlug) {
-                res.status(400).json({ error: 'spec and auditSlug are required' });
+        // Get declared inputs for a registration (lightweight alternative to full GET)
+        this.router.get('/api/agents/registrations/:id/inputs', (req: Request, res: Response) => {
+            const reg = this.registrationStore.get(req.params.id);
+            if (!reg) {
+                res.status(404).json({ error: 'Agent registration not found' });
                 return;
             }
-
-            try {
-                // Start execution asynchronously
-                const executePromise = this.pipelineEngine.execute(
-                    spec as PipelineSpec,
-                    variables ?? {},
-                    auditSlug,
-                    workspacePath
-                );
-
-                // Wait briefly for initialization
-                const run = await Promise.race([
-                    executePromise,
-                    new Promise<null>(resolve => setTimeout(() => resolve(null), 500)),
-                ]);
-
-                if (run) {
-                    res.status(201).json({ runId: run.id, state: run.state });
-                } else {
-                    // Still running - get latest run
-                    const runs = await this.pipelineEngine.listRuns(auditSlug);
-                    const latest = runs[runs.length - 1];
-                    res.status(202).json({ runId: latest?.id ?? 'unknown', state: 'running' });
-                }
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // List pipeline runs
-        this.router.get('/api/pipelines/runs', async (req: Request, res: Response) => {
-            const auditSlug = req.query.auditSlug as string | undefined;
-            try {
-                const runs = await this.pipelineEngine.listRuns(auditSlug);
-                res.json({ runs });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Get pipeline run status
-        this.router.get('/api/pipelines/runs/:runId', async (req: Request, res: Response) => {
-            const { runId } = req.params;
-            const auditSlug = req.query.auditSlug as string;
-            if (!auditSlug) {
-                res.status(400).json({ error: 'auditSlug query parameter is required' });
-                return;
-            }
-
-            try {
-                const run = await this.pipelineEngine.getStatus(runId, auditSlug);
-                if (!run) {
-                    res.status(404).json({ error: 'Pipeline run not found' });
-                    return;
-                }
-                const nodeRuns = await this.pipelineEngine.getNodeRuns(runId, auditSlug);
-                res.json({ run, nodeRuns });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Get pipeline run events
-        this.router.get('/api/pipelines/runs/:runId/events', async (req: Request, res: Response) => {
-            const { runId } = req.params;
-            const auditSlug = req.query.auditSlug as string;
-            if (!auditSlug) {
-                res.status(400).json({ error: 'auditSlug query parameter is required' });
-                return;
-            }
-
-            try {
-                const events = await this.pipelineEngine.getEvents(runId, auditSlug);
-                res.json({ events });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Pause a pipeline run
-        this.router.post('/api/pipelines/runs/:runId/pause', async (req: Request, res: Response) => {
-            try {
-                await this.pipelineEngine.pause(req.params.runId);
-                res.json({ runId: req.params.runId, action: 'paused' });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Resume a pipeline run
-        this.router.post('/api/pipelines/runs/:runId/resume', async (req: Request, res: Response) => {
-            try {
-                await this.pipelineEngine.resume(req.params.runId);
-                res.json({ runId: req.params.runId, action: 'resumed' });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Cancel a pipeline run
-        this.router.post('/api/pipelines/runs/:runId/cancel', async (req: Request, res: Response) => {
-            try {
-                await this.pipelineEngine.cancel(req.params.runId);
-                res.json({ runId: req.params.runId, action: 'cancelled' });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Compile a pipeline spec (preview generated code without executing)
-        this.router.post('/api/pipelines/compile', (req: Request, res: Response) => {
-            const { spec, variables } = req.body;
-            if (!spec) {
-                res.status(400).json({ error: 'spec is required' });
-                return;
-            }
-
-            try {
-                const result = this.pipelineEngine.compile(spec as PipelineSpec, variables);
-                res.json({
-                    script: result.script,
-                    scriptFilename: result.scriptFilename,
-                    files: result.files,
-                    warnings: result.warnings,
-                });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Save a pipeline spec
-        this.router.post('/api/pipelines/specs', async (req: Request, res: Response) => {
-            const { auditSlug, spec } = req.body;
-            if (!auditSlug || !spec) {
-                res.status(400).json({ error: 'auditSlug and spec are required' });
-                return;
-            }
-
-            try {
-                await this.pipelineEngine.saveSpec(auditSlug, spec as PipelineSpec);
-                res.status(201).json({ id: spec.id, saved: true });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // List pipeline specs
-        this.router.get('/api/pipelines/specs', async (req: Request, res: Response) => {
-            const auditSlug = req.query.auditSlug as string;
-            if (!auditSlug) {
-                res.status(400).json({ error: 'auditSlug query parameter is required' });
-                return;
-            }
-
-            try {
-                const specs = await this.pipelineEngine.listSpecs(auditSlug);
-                res.json({ specs });
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
-        });
-
-        // Get a pipeline spec
-        this.router.get('/api/pipelines/specs/:id', async (req: Request, res: Response) => {
-            const auditSlug = req.query.auditSlug as string;
-            if (!auditSlug) {
-                res.status(400).json({ error: 'auditSlug query parameter is required' });
-                return;
-            }
-
-            try {
-                const spec = await this.pipelineEngine.getSpec(auditSlug, req.params.id);
-                if (!spec) {
-                    res.status(404).json({ error: 'Pipeline spec not found' });
-                    return;
-                }
-                res.json(spec);
-            } catch (err) {
-                res.status(500).json({ error: String(err) });
-            }
+            res.json(reg.interface.inputs);
         });
 
         // ====================================================================
@@ -588,6 +289,299 @@ export class RestAPI {
             } else {
                 res.status(404).json({ error: 'Credential not found' });
             }
+        });
+
+        // ====================================================================
+        // Benchmark endpoints
+        // ====================================================================
+
+        // List contests
+        this.router.get('/api/benchmarks/contests', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const source = req.query.source as string | undefined;
+            const temporalBucket = req.query.temporalBucket as string | undefined;
+            const contests = this.benchmarkStore.listContests({ source, temporalBucket });
+            res.json({ contests, total: contests.length });
+        });
+
+        // Get single contest
+        this.router.get('/api/benchmarks/contests/:id', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const contest = this.benchmarkStore.getContest(req.params.id);
+            if (!contest) {
+                res.status(404).json({ error: 'Contest not found' });
+                return;
+            }
+            res.json(contest);
+        });
+
+        // Upsert contest
+        this.router.post('/api/benchmarks/contests', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const contest = req.body;
+            if (!contest.id || !contest.name || !contest.source) {
+                res.status(400).json({ error: 'id, name, and source are required' });
+                return;
+            }
+            this.benchmarkStore.upsertContest(contest);
+            res.status(201).json({ upserted: contest.id });
+        });
+
+        // Get findings for contest
+        this.router.get('/api/benchmarks/contests/:id/findings', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const findings = this.benchmarkStore.getFindingsForContest(req.params.id);
+            res.json({ findings, total: findings.length });
+        });
+
+        // Upsert findings for contest
+        this.router.post('/api/benchmarks/contests/:id/findings', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const { findings } = req.body;
+            if (!Array.isArray(findings)) {
+                res.status(400).json({ error: 'findings array is required' });
+                return;
+            }
+            for (const finding of findings) {
+                finding.contestId = req.params.id;
+                this.benchmarkStore.upsertFinding(finding);
+            }
+            res.status(201).json({ upserted: findings.length });
+        });
+
+        // Create a benchmark run
+        this.router.post('/api/benchmarks/runs', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const run = req.body;
+            if (!run.id || !run.agentId || !run.contestId) {
+                res.status(400).json({ error: 'id, agentId, and contestId are required' });
+                return;
+            }
+            this.benchmarkStore.createRun(run);
+            res.status(201).json({ created: run.id });
+        });
+
+        // Get run status
+        this.router.get('/api/benchmarks/runs/:id', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const run = this.benchmarkStore.getRun(req.params.id);
+            if (!run) {
+                res.status(404).json({ error: 'Run not found' });
+                return;
+            }
+            res.json(run);
+        });
+
+        // Update run status
+        this.router.patch('/api/benchmarks/runs/:id', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const run = this.benchmarkStore.getRun(req.params.id);
+            if (!run) {
+                res.status(404).json({ error: 'Run not found' });
+                return;
+            }
+            this.benchmarkStore.updateRun(req.params.id, req.body);
+            res.json({ updated: req.params.id });
+        });
+
+        // List runs (filterable by agentId, contestId)
+        this.router.get('/api/benchmarks/runs', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const agentId = req.query.agentId as string | undefined;
+            const contestId = req.query.contestId as string | undefined;
+            const runs = this.benchmarkStore.listRuns({ agentId, contestId });
+            res.json({ runs, total: runs.length });
+        });
+
+        // Save evaluation result
+        this.router.post('/api/benchmarks/results', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const result = req.body;
+            if (!result.id || !result.runId || !result.agentId) {
+                res.status(400).json({ error: 'id, runId, and agentId are required' });
+                return;
+            }
+            this.benchmarkStore.saveResult(result);
+            res.status(201).json({ saved: result.id });
+        });
+
+        // List results (filterable by agentId, contestId)
+        this.router.get('/api/benchmarks/results', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const agentId = req.query.agentId as string | undefined;
+            const contestId = req.query.contestId as string | undefined;
+            const results = this.benchmarkStore.listResults({ agentId, contestId });
+            res.json({ results, total: results.length });
+        });
+
+        // Agent score history (for trend charts)
+        this.router.get('/api/benchmarks/agents/:id/history', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const history = this.benchmarkStore.getAgentHistory(req.params.id);
+            res.json({ history, total: history.length });
+        });
+
+        // Import Sherlock index data
+        this.router.post('/api/benchmarks/import/sherlock', (req: Request, res: Response) => {
+            if (!this.benchmarkStore) {
+                res.status(503).json({ error: 'Benchmark store not initialized' });
+                return;
+            }
+            const { indexPath } = req.body;
+            if (!indexPath) {
+                res.status(400).json({ error: 'indexPath is required' });
+                return;
+            }
+            try {
+                const result = importSherlockIndex(this.benchmarkStore, indexPath);
+                res.json({ imported: result });
+            } catch (err) {
+                res.status(500).json({ error: String(err) });
+            }
+        });
+
+        // ====================================================================
+        // Agent execution endpoints
+        // ====================================================================
+
+        // Launch an agent
+        this.router.post('/api/agents/executions', (req: Request, res: Response) => {
+            if (!this.agentExecutor) {
+                res.status(503).json({ error: 'Agent executor not initialized' });
+                return;
+            }
+            const { registrationId, workspacePath, auditSlug, timeout, env, overrides, inputs } = req.body;
+            if (!registrationId || !workspacePath) {
+                res.status(400).json({ error: 'registrationId and workspacePath are required' });
+                return;
+            }
+
+            // Route typed inputs to overrides/env based on registration declarations
+            let resolvedOverrides = { ...(overrides || {}) };
+            let resolvedEnv = { ...(env || {}) };
+
+            if (inputs && typeof inputs === 'object') {
+                const reg = this.registrationStore.get(registrationId);
+                for (const [name, value] of Object.entries(inputs as Record<string, unknown>)) {
+                    const decl = reg?.interface.inputs.find(i => i.name === name);
+                    if (decl?.type === 'workspace') continue;
+                    if (decl?.type === 'env') {
+                        resolvedEnv[name] = String(value);
+                    } else {
+                        // Declared string/file inputs and undeclared inputs route to overrides
+                        resolvedOverrides[name] = String(value);
+                    }
+                }
+            }
+
+            const instanceId = `${registrationId}-${Date.now().toString(36)}`;
+            try {
+                const handle = this.agentExecutor.launch(registrationId, {
+                    instanceId,
+                    auditSlug: auditSlug || 'benchmark',
+                    workspacePath,
+                    mcpServerUrl: '',
+                    timeout,
+                    env: Object.keys(resolvedEnv).length > 0 ? resolvedEnv : undefined,
+                    overrides: Object.keys(resolvedOverrides).length > 0 ? resolvedOverrides : undefined,
+                });
+                res.status(201).json(handle);
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.includes('not found') || msg.includes('Missing required inputs')) {
+                    const status = msg.includes('not found') ? 404 : 400;
+                    res.status(status).json({ error: msg });
+                } else {
+                    res.status(400).json({ error: msg });
+                }
+            }
+        });
+
+        // List all executions
+        this.router.get('/api/agents/executions', (_req: Request, res: Response) => {
+            if (!this.agentExecutor) {
+                res.status(503).json({ error: 'Agent executor not initialized' });
+                return;
+            }
+            res.json(this.agentExecutor.listAll());
+        });
+
+        // Get execution status
+        this.router.get('/api/agents/executions/:instanceId', (req: Request, res: Response) => {
+            if (!this.agentExecutor) {
+                res.status(503).json({ error: 'Agent executor not initialized' });
+                return;
+            }
+            const handle = this.agentExecutor.get(req.params.instanceId);
+            if (!handle) {
+                res.status(404).json({ error: 'Execution not found' });
+                return;
+            }
+            res.json(handle);
+        });
+
+        // Get execution output
+        this.router.get('/api/agents/executions/:instanceId/output', (req: Request, res: Response) => {
+            if (!this.agentExecutor) {
+                res.status(503).json({ error: 'Agent executor not initialized' });
+                return;
+            }
+            const output = this.agentExecutor.getOutput(req.params.instanceId);
+            if (!output) {
+                res.status(404).json({ error: 'Execution not found' });
+                return;
+            }
+            res.json(output);
+        });
+
+        // Stop an execution
+        this.router.delete('/api/agents/executions/:instanceId', (req: Request, res: Response) => {
+            if (!this.agentExecutor) {
+                res.status(503).json({ error: 'Agent executor not initialized' });
+                return;
+            }
+            const stopped = this.agentExecutor.stop(req.params.instanceId);
+            if (!stopped) {
+                res.status(404).json({ error: 'Execution not found or already finished' });
+                return;
+            }
+            res.json({ stopped: req.params.instanceId });
         });
     }
 }

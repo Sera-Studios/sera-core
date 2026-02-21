@@ -6,7 +6,7 @@
  * WebSocket clients subscribed to the relevant audit/table patterns.
  */
 
-import WebSocket from 'ws';
+import { WebSocket } from 'ws';
 import { BridgeEvent, StorageUpdatePushMessage } from '@sera/types';
 
 interface ClientSubscription {
@@ -17,8 +17,16 @@ interface ClientSubscription {
     tablePatterns: string[];
 }
 
+export interface RecordedEvent {
+    type: 'storage-update' | 'bridge-event';
+    timestamp: string;
+    data: Record<string, any>;
+}
+
 export class EventBridge {
     private subscriptions: ClientSubscription[] = [];
+    private recording = false;
+    private recordedEvents: RecordedEvent[] = [];
 
     /**
      * Register a client's table subscriptions
@@ -59,6 +67,14 @@ export class EventBridge {
         action: 'insert' | 'update' | 'delete',
         data: Record<string, any> | Record<string, any>[]
     ): void {
+        if (this.recording) {
+            this.recordedEvents.push({
+                type: 'storage-update',
+                timestamp: new Date().toISOString(),
+                data: { sourceClientId, auditSlug, appletId, table, action, data },
+            });
+        }
+
         const tableKey = `${appletId}:${table}`;
         const message: StorageUpdatePushMessage = {
             type: 'storage:update',
@@ -89,6 +105,14 @@ export class EventBridge {
      * Broadcast a bridge event to all clients on an audit
      */
     broadcastBridgeEvent(event: BridgeEvent): void {
+        if (this.recording) {
+            this.recordedEvents.push({
+                type: 'bridge-event',
+                timestamp: new Date().toISOString(),
+                data: event,
+            });
+        }
+
         const payload = JSON.stringify({
             type: 'bridge:event',
             ...event,
@@ -115,6 +139,38 @@ export class EventBridge {
      */
     getTotalClientCount(): number {
         return this.subscriptions.length;
+    }
+
+    // ========================================================================
+    // RECORDING (testnet mode)
+    // ========================================================================
+
+    /**
+     * Enable event recording. When on, every broadcast appends to an internal log.
+     */
+    enableRecording(): void {
+        this.recording = true;
+    }
+
+    /**
+     * Get all recorded events since recording was enabled (or last clear).
+     */
+    getRecordedEvents(): RecordedEvent[] {
+        return [...this.recordedEvents];
+    }
+
+    /**
+     * Clear the recorded event log.
+     */
+    clearRecordedEvents(): void {
+        this.recordedEvents = [];
+    }
+
+    /**
+     * Whether recording is currently enabled.
+     */
+    isRecording(): boolean {
+        return this.recording;
     }
 
     /**

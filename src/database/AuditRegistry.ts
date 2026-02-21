@@ -21,8 +21,8 @@ export class AuditRegistry {
     private auditsDir: string;
     private data: RegistryData = { workspaces: {} };
 
-    constructor() {
-        this.auditsDir = path.join(getSeraHome(), 'audits');
+    constructor(seraHome?: string) {
+        this.auditsDir = path.join(getSeraHome(seraHome), 'audits');
         this.registryPath = path.join(this.auditsDir, 'registry.json');
     }
 

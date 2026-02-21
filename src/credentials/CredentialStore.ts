@@ -1,15 +1,25 @@
 /**
- * @fileoverview Credential storage for API keys
+ * @fileoverview Encrypted credential storage for API keys
  * @module sera-core/credentials/CredentialStore
  *
- * Stores API keys in ~/.sera/credentials.json with file permissions
- * restricted to owner-only (0o600). Keys are stored in plaintext -
- * file permissions are the security boundary.
+ * Stores API keys in ~/.sera/credentials.vault encrypted with AES-256-GCM.
+ * The vault key is stored at ~/.sera/vault.key with 0o600 permissions.
+ *
+ * Binary vault format: [IV:12 bytes][authTag:16 bytes][ciphertext]
+ *
+ * On first load, if an old plaintext credentials.json exists it is
+ * automatically migrated to the encrypted vault and the plaintext file
+ * is deleted.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'node:crypto';
 import { getSeraHome } from '../config';
+
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
+const KEY_LENGTH = 32; // AES-256
 
 export interface StoredCredential {
     id: string;
@@ -28,25 +38,45 @@ export interface MaskedCredential {
 }
 
 /**
- * Manages API credentials stored in ~/.sera/credentials.json
+ * Manages API credentials stored in an AES-256-GCM encrypted vault.
  */
 export class CredentialStore {
-    private filePath: string;
+    private vaultPath: string;
+    private vaultKeyPath: string;
+    private legacyPath: string;
     private credentials: StoredCredential[] = [];
 
-    constructor() {
-        this.filePath = path.join(getSeraHome(), 'credentials.json');
+    constructor(seraHome?: string) {
+        const home = getSeraHome(seraHome);
+        this.vaultPath = path.join(home, 'credentials.vault');
+        this.vaultKeyPath = path.join(home, 'vault.key');
+        this.legacyPath = path.join(home, 'credentials.json');
         this.load();
     }
 
-    /** Load credentials from disk */
+    /** Load credentials from encrypted vault (or migrate from plaintext) */
     load(): void {
-        if (fs.existsSync(this.filePath)) {
+        // Migration: old plaintext credentials.json -> encrypted vault
+        if (fs.existsSync(this.legacyPath)) {
             try {
-                const raw = fs.readFileSync(this.filePath, 'utf-8');
+                const raw = fs.readFileSync(this.legacyPath, 'utf-8');
                 this.credentials = JSON.parse(raw);
+                this.flush();
+                fs.unlinkSync(this.legacyPath);
+                return;
             } catch {
-                console.warn('[CredentialStore] Failed to load credentials, starting fresh');
+                console.warn('[CredentialStore] Failed to migrate legacy credentials.json');
+            }
+        }
+
+        // Load from encrypted vault
+        if (fs.existsSync(this.vaultPath)) {
+            try {
+                const encrypted = fs.readFileSync(this.vaultPath);
+                const json = this.decrypt(encrypted);
+                this.credentials = JSON.parse(json);
+            } catch {
+                console.warn('[CredentialStore] Failed to decrypt vault, starting fresh');
                 this.credentials = [];
             }
         }
@@ -102,10 +132,47 @@ export class CredentialStore {
         }));
     }
 
-    /** Write credentials to disk with restricted permissions */
+    /** Encrypt and write credentials to disk */
     private flush(): void {
-        const data = JSON.stringify(this.credentials, null, 2);
-        fs.writeFileSync(this.filePath, data, { encoding: 'utf-8', mode: 0o600 });
+        const json = JSON.stringify(this.credentials, null, 2);
+        const encrypted = this.encrypt(json);
+        fs.writeFileSync(this.vaultPath, encrypted, { mode: 0o600 });
+    }
+
+    /** Get or create the 32-byte vault key */
+    private getOrCreateVaultKey(): Buffer {
+        if (fs.existsSync(this.vaultKeyPath)) {
+            return fs.readFileSync(this.vaultKeyPath);
+        }
+        const key = crypto.randomBytes(KEY_LENGTH);
+        // Ensure parent directory exists
+        const dir = path.dirname(this.vaultKeyPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(this.vaultKeyPath, key, { mode: 0o600 });
+        return key;
+    }
+
+    /** Encrypt plaintext to binary: [IV:12][authTag:16][ciphertext] */
+    private encrypt(plaintext: string): Buffer {
+        const key = this.getOrCreateVaultKey();
+        const iv = crypto.randomBytes(IV_LENGTH);
+        const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
+        const authTag = cipher.getAuthTag();
+        return Buffer.concat([iv, authTag, encrypted]);
+    }
+
+    /** Decrypt binary vault data back to plaintext */
+    private decrypt(data: Buffer): string {
+        const key = this.getOrCreateVaultKey();
+        const iv = data.subarray(0, IV_LENGTH);
+        const authTag = data.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+        const ciphertext = data.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(authTag);
+        return decipher.update(ciphertext) + decipher.final('utf-8');
     }
 }
 

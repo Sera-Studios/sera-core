@@ -114,10 +114,12 @@ export class StorageEngine {
                     this.tableCache.set(key, []);
                     results.push({ table: schema.name, exists: false, data: null });
                 } else {
-                    // Version matches - load existing data
-                    const data = this.loadTableDataFromDB(appletId, schema.name);
-                    this.tableCache.set(key, data);
-                    results.push({ table: schema.name, exists: true, data });
+                    // Version matches - use existing cache if populated, else load from DB
+                    if (!this.tableCache.has(key)) {
+                        const data = this.loadTableDataFromDB(appletId, schema.name);
+                        this.tableCache.set(key, data);
+                    }
+                    results.push({ table: schema.name, exists: true, data: this.tableCache.get(key)! });
                 }
             } else {
                 // New table
@@ -141,12 +143,6 @@ export class StorageEngine {
             throw new Error(`Table ${key} not registered`);
         }
 
-        // Validate
-        const validation = this.validateData(appletId, table, data);
-        if (!validation.valid) {
-            throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
-        }
-
         // Sanitize undefined -> null
         const sanitized: Record<string, any> = {};
         for (const [k, v] of Object.entries(data)) {
@@ -162,11 +158,22 @@ export class StorageEngine {
                 pkFields.every(pk => row[pk] === sanitized[pk])
             );
             if (existingIndex >= 0) {
+                // Update (merge) - skip required field validation since existing record has them
                 cachedData[existingIndex] = { ...cachedData[existingIndex], ...sanitized };
             } else {
+                // Insert - validate required fields
+                const validation = this.validateData(appletId, table, data);
+                if (!validation.valid) {
+                    throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+                }
                 cachedData.push(sanitized);
             }
         } else {
+            // No primary key - always insert, validate required fields
+            const validation = this.validateData(appletId, table, data);
+            if (!validation.valid) {
+                throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+            }
             cachedData.push(sanitized);
         }
 

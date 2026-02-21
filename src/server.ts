@@ -26,20 +26,27 @@ import { NotepadHandler } from './mcp/handlers/NotepadHandler';
 import { StatsHandler } from './mcp/handlers/StatsHandler';
 import { TraceHandler } from './mcp/handlers/TraceHandler';
 import { AgentHandler } from './mcp/handlers/AgentHandler';
-import { PipelineHandler } from './mcp/handlers/PipelineHandler';
-import { AgentDefinitionLoader } from './agents/AgentDefinitionLoader';
-import { AgentLifecycleManager } from './agents/AgentLifecycleManager';
 import { AgentRegistrationStore } from './agents/AgentRegistrationStore';
-import { AdapterRegistry } from './agents/adapters/AdapterRegistry';
-import { ClaudeCodeAdapter } from './agents/adapters/ClaudeCodeAdapter';
-import { DockerAdapter } from './agents/adapters/DockerAdapter';
-import { ProcessAdapter } from './agents/adapters/ProcessAdapter';
-import { ScriptAdapter } from './agents/adapters/ScriptAdapter';
-import { PipelineEngine } from './pipeline/PipelineEngine';
-import { PipelinePersistence } from './pipeline/PipelinePersistence';
-import { CompilerRegistry } from './compiler/CompilerRegistry';
-import { PydanticAICompiler } from './compiler/PydanticAICompiler';
 import { CredentialStore } from './credentials/CredentialStore';
+import { BenchmarkStore } from './benchmark/BenchmarkStore';
+import { AgentExecutor } from './execution/AgentExecutor';
+import { DebugHandler } from './mcp/handlers/DebugHandler';
+import { LogBuffer } from './debug/LogBuffer';
+
+export interface SeraCoreOptions {
+    /** Override the sera home directory (default: ~/.sera) */
+    seraHome?: string;
+    /** Override the client/WebSocket port */
+    clientPort?: number;
+    /** Override the MCP server port */
+    mcpPort?: number;
+    /** Override the debug MCP server port (testnet mode only, default: mcpPort + 1) */
+    debugPort?: number;
+    /** Enable testnet mode (debug tools on separate port, event recording) */
+    testnet?: boolean;
+    /** Override the resources directory for agent registrations */
+    resourcesDir?: string;
+}
 
 export class SeraCore {
     private config: SeraConfig;
@@ -50,58 +57,74 @@ export class SeraCore {
     private restApi: RestAPI;
     private mcpServer: MCPServer;
     private server!: http.Server;
-    private agentLoader: AgentDefinitionLoader;
-    private agentManager: AgentLifecycleManager;
     private registrationStore: AgentRegistrationStore;
-    private adapterRegistry: AdapterRegistry;
-    private pipelineEngine: PipelineEngine;
+    private benchmarkStore: BenchmarkStore;
+    private cleanupTimer?: ReturnType<typeof setInterval>;
+    private options: SeraCoreOptions;
+    private logBuffer?: LogBuffer;
+    private debugMcpServer?: MCPServer;
 
-    constructor() {
-        ensureSeraHome();
-        this.config = loadConfig();
+    constructor(options?: SeraCoreOptions) {
+        this.options = options || {};
+        const seraHome = this.options.seraHome;
 
-        this.registry = new AuditRegistry();
+        ensureSeraHome(seraHome);
+        this.config = loadConfig(seraHome);
+
+        // Apply port overrides
+        if (this.options.clientPort !== undefined) {
+            this.config.ports.client = this.options.clientPort;
+        }
+        if (this.options.mcpPort !== undefined) {
+            this.config.ports.mcp = this.options.mcpPort;
+        }
+
+        this.registry = new AuditRegistry(seraHome);
         this.registry.load();
 
         this.dbManager = new DatabaseManager(this.registry, this.config.database.flushIntervalMs);
         this.bridge = new EventBridge();
 
-        // Initialize agent infrastructure
-        this.agentLoader = new AgentDefinitionLoader();
-        this.registrationStore = new AgentRegistrationStore();
-        this.adapterRegistry = new AdapterRegistry();
-        this.adapterRegistry.register(new ClaudeCodeAdapter(this.agentLoader, this.config.ports.mcp));
-        this.adapterRegistry.register(new DockerAdapter());
-        this.adapterRegistry.register(new ProcessAdapter());
-        this.adapterRegistry.register(new ScriptAdapter());
-        this.agentManager = new AgentLifecycleManager(
-            this.adapterRegistry, this.registrationStore, this.config.ports.mcp
-        );
-
-        // Initialize pipeline compiler registry
-        const compilerRegistry = new CompilerRegistry();
-        compilerRegistry.register(new PydanticAICompiler());
+        // Initialize agent registration store
+        this.registrationStore = new AgentRegistrationStore(this.options.resourcesDir);
 
         // Initialize credential store
-        const credentialStore = new CredentialStore();
+        const credentialStore = new CredentialStore(seraHome);
 
-        // Initialize pipeline engine
-        const pipelinePersistence = new PipelinePersistence(this.dbManager);
-        this.pipelineEngine = new PipelineEngine(
-            pipelinePersistence, compilerRegistry, this.bridge, credentialStore
-        );
+        // Initialize benchmark store
+        this.benchmarkStore = new BenchmarkStore(seraHome);
+
+        // Initialize agent executor
+        const agentExecutor = new AgentExecutor(credentialStore, this.registrationStore);
 
         this.wsApi = new WebSocketAPI(this.dbManager, this.registry, this.bridge);
         this.restApi = new RestAPI(
             this.registry, this.dbManager,
             () => this.wsApi.getClientCount(),
-            this.agentManager, this.agentLoader, this.registrationStore,
-            this.pipelineEngine, credentialStore
+            this.registrationStore,
+            credentialStore,
+            this.benchmarkStore,
+            agentExecutor,
         );
 
         // Initialize MCP server with handlers
         this.mcpServer = new MCPServer(this.dbManager, this.registry, this.bridge);
         this.registerMcpHandlers();
+
+        // Testnet mode: spin up a separate debug MCP server with event recording
+        if (this.options.testnet) {
+            this.logBuffer = new LogBuffer();
+            this.bridge.enableRecording();
+
+            // Debug tools go on their own MCPServer instance (separate port)
+            this.debugMcpServer = new MCPServer(this.dbManager, this.registry, this.bridge);
+            this.debugMcpServer.registerHandler(new DebugHandler(
+                this.logBuffer,
+                this.bridge,
+                () => this.mcpServer.getSessionList(),
+            ));
+            console.log('[sera-core] Testnet mode: debug MCP server configured, event recording on');
+        }
     }
 
     /**
@@ -116,8 +139,7 @@ export class SeraCore {
         this.mcpServer.registerHandler(new NotepadHandler());
         this.mcpServer.registerHandler(new StatsHandler());
         this.mcpServer.registerHandler(new TraceHandler());
-        this.mcpServer.registerHandler(new AgentHandler(this.agentManager, this.registrationStore));
-        this.mcpServer.registerHandler(new PipelineHandler(this.pipelineEngine));
+        this.mcpServer.registerHandler(new AgentHandler(this.registrationStore));
 
         console.log('[sera-core] MCP handlers registered');
     }
@@ -126,6 +148,9 @@ export class SeraCore {
      * Start the sera-core daemon
      */
     async start(): Promise<void> {
+        // Initialize benchmark store (async - needs sql.js WASM)
+        await this.benchmarkStore.initialize();
+
         const app = express();
 
         // CORS - allow editor dev server and other local origins
@@ -158,10 +183,59 @@ export class SeraCore {
         await this.mcpServer.start(this.config.ports.mcp);
         console.log(`[sera-core] MCP server: http://localhost:${this.config.ports.mcp}/mcp`);
 
+        // Start debug MCP server on its own port (testnet mode only)
+        if (this.debugMcpServer) {
+            const debugPort = this.options.debugPort ?? (this.config.ports.mcp + 1);
+            await this.debugMcpServer.start(debugPort);
+            console.log(`[sera-core] Debug MCP server: http://localhost:${debugPort}/mcp`);
+        }
+
         // Start periodic session cleanup
-        setInterval(() => {
+        this.cleanupTimer = setInterval(() => {
             this.mcpServer.cleanupStaleSessions(90_000);
         }, 30_000);
+    }
+
+    /**
+     * Get the effective client port (useful for tests with random ports)
+     */
+    getClientPort(): number {
+        return this.config.ports.client;
+    }
+
+    /**
+     * Get the effective MCP port (useful for tests with random ports)
+     */
+    getMcpPort(): number {
+        return this.config.ports.mcp;
+    }
+
+    /**
+     * Get the effective debug MCP port (testnet mode only)
+     */
+    getDebugPort(): number {
+        return this.options.debugPort ?? (this.config.ports.mcp + 1);
+    }
+
+    /**
+     * Whether this instance is running in testnet mode
+     */
+    isTestnet(): boolean {
+        return this.options.testnet === true;
+    }
+
+    /**
+     * Get the log buffer (testnet mode only)
+     */
+    getLogBuffer(): LogBuffer | undefined {
+        return this.logBuffer;
+    }
+
+    /**
+     * Get the event bridge (for test access to recorded events)
+     */
+    getEventBridge(): EventBridge {
+        return this.bridge;
     }
 
     /**
@@ -170,17 +244,25 @@ export class SeraCore {
     async stop(): Promise<void> {
         console.log('[sera-core] Shutting down...');
 
-        // Stop all active pipeline runs
-        await this.pipelineEngine.stopAll();
-
-        // Stop all running agents
-        await this.agentManager.stopAll();
+        // Clear periodic cleanup timer
+        if (this.cleanupTimer) {
+            clearInterval(this.cleanupTimer);
+            this.cleanupTimer = undefined;
+        }
 
         // Stop MCP server
         await this.mcpServer.stop();
 
+        // Stop debug MCP server
+        if (this.debugMcpServer) {
+            await this.debugMcpServer.stop();
+        }
+
         // Close WebSocket connections
         this.wsApi.shutdown();
+
+        // Shut down benchmark store
+        await this.benchmarkStore.shutdown();
 
         // Shut down all database engines
         await this.dbManager.shutdownAll();
@@ -214,6 +296,15 @@ async function main(): Promise<void> {
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
+
+    // Prevent crashes from unhandled errors - log and continue
+    process.on('uncaughtException', (err) => {
+        console.error('[sera-core] Uncaught exception (process stays alive):', err.message);
+        console.error(err.stack);
+    });
+    process.on('unhandledRejection', (reason) => {
+        console.error('[sera-core] Unhandled rejection (process stays alive):', reason);
+    });
 
     await core.start();
 }

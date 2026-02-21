@@ -1,6 +1,10 @@
 /**
  * @fileoverview Configuration loading and defaults for sera-core
  * @module sera-core/config
+ *
+ * All paths are derived from the sera home directory, which defaults to
+ * ~/.sera but can be overridden per-call (for test isolation) or globally
+ * via the SERA_HOME environment variable.
  */
 
 import * as fs from 'fs';
@@ -24,52 +28,63 @@ export interface SeraConfig {
     };
 }
 
-const SERA_HOME = path.join(os.homedir(), '.sera');
+const DEFAULT_SERA_HOME = path.join(os.homedir(), '.sera');
 
-const DEFAULT_CONFIG: SeraConfig = {
-    ports: {
-        client: 9800,
-        mcp: 9877,
-    },
-    logging: {
-        level: 'info',
-        file: path.join(SERA_HOME, 'logs', 'sera-core.log'),
-        maxSize: '10m',
-        maxFiles: 5,
-    },
-    database: {
-        flushIntervalMs: 30000,
-        backupOnMigrate: true,
-    },
-};
+function resolveSeraHome(override?: string): string {
+    return override || process.env.SERA_HOME || DEFAULT_SERA_HOME;
+}
+
+function buildDefaultConfig(seraHome: string): SeraConfig {
+    return {
+        ports: {
+            client: 9800,
+            mcp: 9877,
+        },
+        logging: {
+            level: 'info',
+            file: path.join(seraHome, 'logs', 'sera-core.log'),
+            maxSize: '10m',
+            maxFiles: 5,
+        },
+        database: {
+            flushIntervalMs: 30000,
+            backupOnMigrate: true,
+        },
+    };
+}
 
 /**
- * Load configuration from ~/.sera/config.json, merged with defaults
+ * Load configuration, merged with defaults
+ * @param seraHomeOverride - Use this directory instead of ~/.sera
  * @returns Merged configuration
  */
-export function loadConfig(): SeraConfig {
-    const configPath = path.join(SERA_HOME, 'config.json');
+export function loadConfig(seraHomeOverride?: string): SeraConfig {
+    const seraHome = resolveSeraHome(seraHomeOverride);
+    const defaults = buildDefaultConfig(seraHome);
+    const configPath = path.join(seraHome, 'config.json');
 
     if (fs.existsSync(configPath)) {
         try {
             const userConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-            return deepMerge(DEFAULT_CONFIG, userConfig);
+            return deepMerge(defaults, userConfig);
         } catch (err) {
             console.warn(`[sera-core] Failed to load config from ${configPath}: ${err}`);
         }
     }
 
-    return { ...DEFAULT_CONFIG };
+    return { ...defaults };
 }
 
 /**
- * Ensure the ~/.sera directory structure exists
+ * Ensure the sera home directory structure exists
+ * @param seraHomeOverride - Use this directory instead of ~/.sera
  */
-export function ensureSeraHome(): void {
+export function ensureSeraHome(seraHomeOverride?: string): void {
+    const seraHome = resolveSeraHome(seraHomeOverride);
     const dirs = [
-        SERA_HOME,
-        path.join(SERA_HOME, 'audits'),
-        path.join(SERA_HOME, 'logs'),
+        seraHome,
+        path.join(seraHome, 'audits'),
+        path.join(seraHome, 'logs'),
     ];
 
     for (const dir of dirs) {
@@ -81,9 +96,10 @@ export function ensureSeraHome(): void {
 
 /**
  * Get the sera home directory path
+ * @param override - Use this directory instead of ~/.sera
  */
-export function getSeraHome(): string {
-    return SERA_HOME;
+export function getSeraHome(override?: string): string {
+    return resolveSeraHome(override);
 }
 
 function deepMerge(target: any, source: any): any {

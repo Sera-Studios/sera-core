@@ -8,9 +8,9 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { AgentRegistration } from '@sera/types';
-import { isLegacyDefinition, convertLegacyDefinition } from './legacy/LegacyConverter';
 
 export class AgentRegistrationStore {
     private registrations: Map<string, AgentRegistration> = new Map();
@@ -18,9 +18,13 @@ export class AgentRegistrationStore {
 
     constructor(resourcesDir?: string) {
         this.diskDir = path.join(
-            resourcesDir || path.resolve(__dirname, '../../../../resources'),
+            resourcesDir || path.join(os.homedir(), '.sera'),
             'agents'
         );
+        // Ensure directory exists
+        if (!fs.existsSync(this.diskDir)) {
+            fs.mkdirSync(this.diskDir, { recursive: true });
+        }
         this.loadFromDisk();
     }
 
@@ -41,19 +45,13 @@ export class AgentRegistrationStore {
                 const filePath = path.join(this.diskDir, file);
                 const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
 
-                if (!raw.id || !raw.name) {
+                if (!raw.id || !raw.name || !raw.execution) {
                     console.warn(`[RegistrationStore] Skipping invalid file: ${file}`);
                     continue;
                 }
 
-                if (isLegacyDefinition(raw)) {
-                    const reg = convertLegacyDefinition(raw);
-                    this.registrations.set(reg.id, reg);
-                    console.log(`[RegistrationStore] Loaded (legacy): ${reg.id} (${reg.name})`);
-                } else {
-                    this.registrations.set(raw.id, raw as AgentRegistration);
-                    console.log(`[RegistrationStore] Loaded: ${raw.id} (${raw.name})`);
-                }
+                this.registrations.set(raw.id, raw as AgentRegistration);
+                console.log(`[RegistrationStore] Loaded: ${raw.id} (${raw.name})`);
             } catch (err) {
                 console.error(`[RegistrationStore] Failed to load ${file}:`, err);
             }
@@ -129,5 +127,34 @@ export class AgentRegistrationStore {
      */
     get size(): number {
         return this.registrations.size;
+    }
+
+    /**
+     * Get the disk directory path where registrations are stored.
+     */
+    getDiskDir(): string {
+        return this.diskDir;
+    }
+
+    /**
+     * Write script artifacts to disk for a registered agent.
+     * Creates ~/.sera/agents/{id}/ and writes each artifact file.
+     * @param id - Agent registration ID
+     * @param artifacts - Array of {name, content} pairs to write
+     * @returns Absolute path to the artifact directory
+     */
+    writeArtifacts(id: string, artifacts: Array<{ name: string; content: string }>): string {
+        const artifactDir = path.join(this.diskDir, id);
+        if (!fs.existsSync(artifactDir)) {
+            fs.mkdirSync(artifactDir, { recursive: true });
+        }
+
+        for (const artifact of artifacts) {
+            const filePath = path.join(artifactDir, artifact.name);
+            fs.writeFileSync(filePath, artifact.content);
+        }
+
+        console.log(`[RegistrationStore] Wrote ${artifacts.length} artifacts for: ${id}`);
+        return artifactDir;
     }
 }

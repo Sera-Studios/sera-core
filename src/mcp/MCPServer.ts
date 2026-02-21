@@ -2,13 +2,15 @@
  * @fileoverview sera-core MCP Server - HTTP JSON-RPC endpoint for Claude Code agents
  * @module sera-core/mcp/MCPServer
  *
- * Runs on a dedicated port (default 9877). Agents connect via HTTP POST to /mcp.
- * Each agent session is tracked and mapped to an audit via the first heartbeat.
- * Tool calls are dispatched to registered PortableMcpHandlers with a per-call
- * HandlerContext providing scoped database and bridge access.
+ * Runs on a dedicated port (default 9877). Agents connect via HTTP POST to /mcp
+ * or /mcp/:audit-slug for audit-scoped routing. Each agent session is tracked
+ * via the register_agent tool. Tool calls are dispatched to registered
+ * PortableMcpHandlers with a per-call HandlerContext providing scoped database
+ * and bridge access.
  */
 
 import * as http from 'http';
+import * as crypto from 'crypto';
 import {
     McpToolDefinition,
     McpToolResult,
@@ -29,12 +31,38 @@ interface SessionState {
     auditSlug: string | null;
     workspacePath: string | null;
     lastHeartbeat: Date;
+    agentId: string | null;
+    agentName: string | null;
+    agentVersion: string | null;
+    registeredAt: Date | null;
 }
+
+/** Built-in register_agent tool definition */
+const REGISTER_AGENT_TOOL: McpToolDefinition = {
+    name: 'register_agent',
+    description: 'Register this agent session. Call once at session start. Returns an agent_id to include in all subsequent tool calls.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            agent_name: {
+                type: 'string',
+                description: 'Agent role name (e.g. "hunter", "cartographer")',
+            },
+            agent_version: {
+                type: 'string',
+                description: 'Agent version string (e.g. "0.0.1")',
+            },
+        },
+        required: ['agent_name', 'agent_version'],
+    },
+};
 
 export class MCPServer {
     private httpServer?: http.Server;
     private toolRegistry: Map<string, PortableMcpHandler> = new Map();
     private sessions: Map<string, SessionState> = new Map();
+    /** Reverse lookup: agentId -> sessionId */
+    private agentIdToSession: Map<string, string> = new Map();
     private dbManager: DatabaseManager;
     private registry: AuditRegistry;
     private bridge: EventBridge;
@@ -85,8 +113,12 @@ export class MCPServer {
                 const url = req.url || '/';
 
                 try {
-                    if (url === '/mcp' && req.method === 'POST') {
-                        await this.handleMCPRequest(req, res);
+                    // Parse URL: /mcp or /mcp/:slug
+                    const mcpMatch = url.match(/^\/mcp(?:\/([a-zA-Z0-9_-]+))?$/);
+
+                    if (mcpMatch && req.method === 'POST') {
+                        const urlAuditSlug = mcpMatch[1] || null;
+                        await this.handleMCPRequest(req, res, urlAuditSlug);
                     } else if (url === '/mcp/tools' && req.method === 'GET') {
                         this.handleToolsList(res);
                     } else if (url === '/health' && req.method === 'GET') {
@@ -140,7 +172,15 @@ export class MCPServer {
     // JSON-RPC DISPATCH
     // ========================================================================
 
-    private async handleMCPRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    /**
+     * Handle an MCP JSON-RPC request
+     * @param urlAuditSlug - Audit slug extracted from URL path, if present
+     */
+    private async handleMCPRequest(
+        req: http.IncomingMessage,
+        res: http.ServerResponse,
+        urlAuditSlug: string | null
+    ): Promise<void> {
         const body = await this.readBody(req);
 
         try {
@@ -170,7 +210,7 @@ export class MCPServer {
                 }));
             } else if (request.method === 'tools/call') {
                 const { name, arguments: args } = request.params;
-                const result = await this.handleToolCall(name, args || {});
+                const result = await this.handleToolCall(name, args || {}, urlAuditSlug);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
                     jsonrpc: '2.0',
@@ -199,16 +239,35 @@ export class MCPServer {
     // ========================================================================
 
     /**
-     * Get all registered tool definitions
+     * Get all registered tool definitions, plus built-in tools.
+     * Injects an optional agent_id property into every tool's input schema.
      */
     getTools(): McpToolDefinition[] {
         const allTools: McpToolDefinition[] = [];
         const seen = new Set<string>();
 
+        // Add built-in register_agent tool
+        allTools.push(REGISTER_AGENT_TOOL);
+        seen.add(REGISTER_AGENT_TOOL.name);
+
         for (const handler of new Set(this.toolRegistry.values())) {
             for (const tool of handler.getToolDefinitions()) {
                 if (!seen.has(tool.name)) {
-                    allTools.push(tool);
+                    // Inject agent_id into every handler tool's schema
+                    const augmented: McpToolDefinition = {
+                        ...tool,
+                        inputSchema: {
+                            ...tool.inputSchema,
+                            properties: {
+                                ...tool.inputSchema.properties,
+                                agent_id: {
+                                    type: 'string',
+                                    description: 'Agent ID from register_agent. Include on every call for session tracking.',
+                                },
+                            },
+                        },
+                    };
+                    allTools.push(augmented);
                     seen.add(tool.name);
                 }
             }
@@ -219,47 +278,161 @@ export class MCPServer {
 
     /**
      * Handle a tool call. Builds HandlerContext and delegates to the registered handler.
+     * @param urlAuditSlug - Audit slug from URL path (takes priority over session/default)
      */
-    private async handleToolCall(toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-        console.log(`[MCP] Tool call: ${toolName}`);
+    private async handleToolCall(
+        toolName: string,
+        args: Record<string, unknown>,
+        urlAuditSlug: string | null
+    ): Promise<McpToolResult> {
+        console.log(`[MCP] Tool call: ${toolName}${urlAuditSlug ? ` (audit=${urlAuditSlug})` : ''}`);
 
         try {
+            // Extract agent_id from args (injected param, not passed to handlers)
+            const agentId = args.agent_id as string | undefined;
+            const handlerArgs = { ...args };
+            delete handlerArgs.agent_id;
+
+            // Resolve session from agent_id
+            let session: SessionState | undefined;
+            if (agentId) {
+                const sessionId = this.agentIdToSession.get(agentId);
+                if (sessionId) {
+                    session = this.sessions.get(sessionId);
+                }
+            }
+
+            // Handle built-in register_agent tool
+            if (toolName === 'register_agent') {
+                return this.handleRegisterAgent(handlerArgs, urlAuditSlug);
+            }
+
+            // Check handler registry for all other tools
             const handler = this.toolRegistry.get(toolName);
             if (!handler) {
                 return this.errorResult(`Unknown tool: ${toolName}`);
             }
 
-            // Resolve session context
-            const sessionId = (args.session_id as string) || `mcp_${Date.now()}`;
-            const agentType = (args.agent_type as string) || 'hunter';
+            // Resolve session context (legacy fallback)
+            const sessionId = (handlerArgs.session_id as string) || session?.sessionId || `mcp_${Date.now()}`;
+            const agentType = session?.agentName || (handlerArgs.agent_type as string) || 'hunter';
 
-            // Track session on heartbeat
+            // Track session on heartbeat (legacy support)
             if (toolName === 'heartbeat') {
                 this.trackSession(sessionId, agentType);
             }
 
-            // Resolve audit slug from session or default
-            const session = this.sessions.get(sessionId);
-            const auditSlug = session?.auditSlug || this.resolveDefaultAudit();
+            // Resolve audit slug: URL path > session > default
+            const auditSlug = urlAuditSlug
+                || session?.auditSlug
+                || this.sessions.get(sessionId)?.auditSlug
+                || this.resolveDefaultAudit();
 
             if (!auditSlug) {
                 return this.errorResult(
-                    'No audit context. Send a heartbeat first or ensure at least one audit exists.'
+                    'No audit context. Register via /mcp/:audit-slug or ensure at least one audit exists.'
+                );
+            }
+
+            // Validate URL slug exists in registry
+            if (urlAuditSlug && !this.registry.auditExists(urlAuditSlug)) {
+                return this.errorResult(
+                    `Unknown audit slug: ${urlAuditSlug}. Check the MCP URL in .mcp.json.`
                 );
             }
 
             // Ensure table schemas are registered for this handler
             await this.ensureTablesRegistered(handler, auditSlug);
 
-            // Build context
-            const context = await this.buildContext(auditSlug, sessionId, agentType, session?.workspacePath || '');
+            // Build context with agent info if available
+            const context = await this.buildContext(
+                auditSlug, sessionId, agentType,
+                session?.workspacePath || '',
+                session?.agentId || agentId,
+                session?.agentName,
+                session?.agentVersion
+            );
 
-            const result = await handler.handleToolCall(toolName, args, context);
+            const result = await handler.handleToolCall(toolName, handlerArgs, context);
             return this.successResult(result);
         } catch (error) {
             console.error(`[MCP] Error in tool ${toolName}:`, error);
             return this.errorResult(`Error: ${error}`);
         }
+    }
+
+    // ========================================================================
+    // AGENT REGISTRATION
+    // ========================================================================
+
+    /**
+     * Handle the built-in register_agent tool call
+     */
+    private async handleRegisterAgent(
+        args: Record<string, unknown>,
+        urlAuditSlug: string | null
+    ): Promise<McpToolResult> {
+        const agentName = args.agent_name as string;
+        const agentVersion = args.agent_version as string;
+
+        if (!agentName || !agentVersion) {
+            return this.errorResult('agent_name and agent_version are required.');
+        }
+
+        // Generate unique agent ID
+        const shortId = crypto.randomBytes(3).toString('hex');
+        const agentId = `${agentName}-${shortId}`;
+
+        // Resolve audit slug
+        const auditSlug = urlAuditSlug || this.resolveDefaultAudit();
+        if (!auditSlug) {
+            return this.errorResult('No audit context available. Use /mcp/:audit-slug URL.');
+        }
+
+        if (urlAuditSlug && !this.registry.auditExists(urlAuditSlug)) {
+            return this.errorResult(`Unknown audit slug: ${urlAuditSlug}`);
+        }
+
+        // Create session state
+        const sessionId = `agent_${agentId}`;
+        const session: SessionState = {
+            sessionId,
+            agentType: agentName,
+            auditSlug,
+            workspacePath: null,
+            lastHeartbeat: new Date(),
+            agentId,
+            agentName,
+            agentVersion,
+            registeredAt: new Date(),
+        };
+
+        this.sessions.set(sessionId, session);
+        this.agentIdToSession.set(agentId, sessionId);
+
+        console.log(`[MCP] Agent registered: ${agentId} (${agentName} v${agentVersion}) audit=${auditSlug}`);
+
+        // Persist to claude_sessions table for visibility
+        try {
+            const engine = await this.dbManager.getEngine(auditSlug);
+            engine.write('sessionbridge', 'claude_sessions', {
+                sessionId,
+                agentType: agentName,
+                startedAt: new Date().toISOString(),
+                lastHeartbeat: new Date().toISOString(),
+                promptCount: 0,
+                totalTokens: 0,
+            });
+        } catch (err) {
+            // Non-fatal - session still works in memory
+            console.warn(`[MCP] Failed to persist agent session: ${err}`);
+        }
+
+        return this.successResult({
+            agent_id: agentId,
+            audit_slug: auditSlug,
+            message: 'Registered. Include agent_id in all subsequent tool calls.',
+        });
     }
 
     // ========================================================================
@@ -279,6 +452,10 @@ export class MCPServer {
                 auditSlug,
                 workspacePath: null,
                 lastHeartbeat: new Date(),
+                agentId: null,
+                agentName: null,
+                agentVersion: null,
+                registeredAt: null,
             };
             this.sessions.set(sessionId, session);
             console.log(`[MCP] New session: ${sessionId} (${agentType}) audit=${auditSlug}`);
@@ -295,6 +472,23 @@ export class MCPServer {
     }
 
     /**
+     * Get a summary list of all active sessions (for debug tools)
+     */
+    getSessionList(): Array<{ sessionId: string; agentType: string; agentId: string | null; auditSlug: string | null; lastHeartbeat: string }> {
+        const result: Array<{ sessionId: string; agentType: string; agentId: string | null; auditSlug: string | null; lastHeartbeat: string }> = [];
+        for (const [, session] of this.sessions) {
+            result.push({
+                sessionId: session.sessionId,
+                agentType: session.agentType,
+                agentId: session.agentId,
+                auditSlug: session.auditSlug,
+                lastHeartbeat: session.lastHeartbeat.toISOString(),
+            });
+        }
+        return result;
+    }
+
+    /**
      * Clean up stale sessions
      */
     cleanupStaleSessions(timeoutMs: number): string[] {
@@ -304,6 +498,10 @@ export class MCPServer {
         for (const [sessionId, session] of this.sessions) {
             if (now - session.lastHeartbeat.getTime() > timeoutMs) {
                 stale.push(sessionId);
+                // Clean up reverse lookup
+                if (session.agentId) {
+                    this.agentIdToSession.delete(session.agentId);
+                }
                 this.sessions.delete(sessionId);
                 console.log(`[MCP] Session expired: ${sessionId}`);
             }
@@ -323,7 +521,10 @@ export class MCPServer {
         auditSlug: string,
         sessionId: string,
         agentType: string,
-        workspacePath: string
+        workspacePath: string,
+        agentId?: string | null,
+        agentName?: string | null,
+        agentVersion?: string | null
     ): Promise<HandlerContext> {
         const engine = await this.dbManager.getEngine(auditSlug);
 
@@ -367,7 +568,12 @@ export class MCPServer {
             },
         };
 
-        return { auditSlug, sessionId, agentType, workspacePath, db, bridge };
+        const context: HandlerContext = { auditSlug, sessionId, agentType, workspacePath, db, bridge };
+        if (agentId) { context.agentId = agentId; }
+        if (agentName) { context.agentName = agentName; }
+        if (agentVersion) { context.agentVersion = agentVersion; }
+
+        return context;
     }
 
     /**

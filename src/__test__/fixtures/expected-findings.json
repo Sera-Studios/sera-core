@@ -1,0 +1,22 @@
+[
+    {
+        "id": "test-finding-1",
+        "title": "Reentrancy in withdraw()",
+        "severity": "critical",
+        "type": "issue",
+        "filePath": "audit-repos/test-repo-abc12345/contracts/Vault.sol",
+        "lineNumber": 42,
+        "description": "The withdraw function sends ETH before updating the balance, allowing reentrancy.",
+        "status": "open"
+    },
+    {
+        "id": "test-finding-2",
+        "title": "Missing zero-address check",
+        "severity": "low",
+        "type": "issue",
+        "filePath": "audit-repos/test-repo-abc12345/contracts/Token.sol",
+        "lineNumber": 15,
+        "description": "The constructor does not validate that the owner address is non-zero.",
+        "status": "open"
+    }
+]

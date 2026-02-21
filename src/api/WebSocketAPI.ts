@@ -6,7 +6,7 @@
  * and CLI tools. Routes storage operations to the correct audit database.
  */
 
-import WebSocket from 'ws';
+import { WebSocket, WebSocketServer, RawData } from 'ws';
 import { Server as HttpServer } from 'http';
 import {
     ClientMessage,
@@ -38,7 +38,7 @@ interface ClientState {
 }
 
 export class WebSocketAPI {
-    private wss!: WebSocket.Server;
+    private wss!: WebSocketServer;
     private clients: Map<string, ClientState> = new Map();
     private dbManager: DatabaseManager;
     private registry: AuditRegistry;
@@ -54,7 +54,7 @@ export class WebSocketAPI {
      * Attach WebSocket server to an HTTP server
      */
     attach(server: HttpServer): void {
-        this.wss = new WebSocket.Server({ server });
+        this.wss = new WebSocketServer({ server });
 
         this.wss.on('connection', (ws: WebSocket) => {
             this.handleConnection(ws);
@@ -88,7 +88,7 @@ export class WebSocketAPI {
     private handleConnection(ws: WebSocket): void {
         let clientState: ClientState | null = null;
 
-        ws.on('message', async (raw: WebSocket.RawData) => {
+        ws.on('message', async (raw: RawData) => {
             try {
                 const message = JSON.parse(raw.toString()) as ClientMessage;
 
