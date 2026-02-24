@@ -65,14 +65,14 @@ describe('NotepadHandler', () => {
     });
 
     // ========================================================================
-    // submit_notepad_issue
+    // submit_finding
     // ========================================================================
 
-    describe('submit_notepad_issue', () => {
-        it('submits a critical issue', async () => {
+    describe('submit_finding', () => {
+        it('submits a critical finding', async () => {
             await setup();
 
-            const result = await client.callTool('submit_notepad_issue', {
+            const result = await client.callTool('submit_finding', {
                 file: 'contracts/Vault.sol',
                 start_line: 42,
                 end_line: 58,
@@ -84,15 +84,15 @@ describe('NotepadHandler', () => {
 
             expect(result.isError).not.toBe(true);
             const data = parseResult(result);
-            expect(data.issue_id).toBeDefined();
-            expect(data.issue_id).toContain('issue-');
+            expect(data.finding_id).toBeDefined();
+            expect(data.finding_id).toContain('issue-');
             expect(data.displayed_in_editor).toBe(true);
         });
 
-        it('submits a medium severity issue', async () => {
+        it('submits a medium severity finding', async () => {
             await setup();
 
-            const result = await client.callTool('submit_notepad_issue', {
+            const result = await client.callTool('submit_finding', {
                 file: 'contracts/Token.sol',
                 start_line: 10,
                 end_line: 15,
@@ -103,6 +103,68 @@ describe('NotepadHandler', () => {
             });
 
             expect(result.isError).not.toBe(true);
+        });
+    });
+
+    // ========================================================================
+    // finalise_finding
+    // ========================================================================
+
+    describe('finalise_finding', () => {
+        it('finalises a previously submitted finding', async () => {
+            await setup();
+
+            // Submit a finding first
+            const submitResult = await client.callTool('submit_finding', {
+                file: 'contracts/Vault.sol',
+                start_line: 42,
+                end_line: 58,
+                title: 'Reentrancy in withdraw',
+                severity: 'critical',
+                description: 'External call before state update allows reentrancy',
+                recommendation: 'Use CEI pattern',
+            });
+            const { finding_id } = parseResult(submitResult);
+
+            // Finalise it
+            const result = await client.callTool('finalise_finding', {
+                finding_id,
+            });
+
+            expect(result.isError).not.toBe(true);
+            const data = parseResult(result);
+            expect(data.finding_id).toBe(finding_id);
+            expect(data.finalised).toBe(true);
+        });
+
+        it('throws when finding does not exist', async () => {
+            await setup();
+
+            const result = await client.callTool('finalise_finding', {
+                finding_id: 'nonexistent-finding',
+            });
+            expect(result.isError).toBe(true);
+        });
+
+        it('throws when finding already finalised', async () => {
+            await setup();
+
+            // Submit and finalise
+            const submitResult = await client.callTool('submit_finding', {
+                file: 'contracts/Vault.sol',
+                start_line: 1,
+                end_line: 5,
+                title: 'Test finding',
+                severity: 'high',
+                description: 'Test',
+                recommendation: 'Fix',
+            });
+            const { finding_id } = parseResult(submitResult);
+            await client.callTool('finalise_finding', { finding_id });
+
+            // Try to finalise again
+            const result = await client.callTool('finalise_finding', { finding_id });
+            expect(result.isError).toBe(true);
         });
     });
 
@@ -271,7 +333,7 @@ describe('NotepadHandler', () => {
                 text: 'POI 1',
             });
 
-            await client.callTool('submit_notepad_issue', {
+            await client.callTool('submit_finding', {
                 file: 'b.sol',
                 start_line: 1,
                 end_line: 1,

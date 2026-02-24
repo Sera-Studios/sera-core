@@ -50,7 +50,7 @@ describe('Agent Session E2E', () => {
         expect(hb.session_active).toBe(true);
 
         // Step 3: Submit a notepad issue (finding)
-        const issueResult = await agent.callTool('submit_notepad_issue', {
+        const issueResult = await agent.callTool('submit_finding', {
             agent_id: agentId,
             file: 'contracts/Vault.sol',
             start_line: 42,
@@ -62,7 +62,7 @@ describe('Agent Session E2E', () => {
         });
         expect(issueResult.isError).not.toBe(true);
         const issue = parse(issueResult);
-        expect(issue.issue_id).toBeDefined();
+        expect(issue.finding_id).toBeDefined();
 
         // Step 4: Submit a point of interest
         const poiResult = await agent.callTool('submit_poi', {

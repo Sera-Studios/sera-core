@@ -71,7 +71,7 @@ describe('Multi-Audit Isolation E2E', () => {
         }));
 
         // Submit finding to audit-a
-        const issueA = await agentA.callTool('submit_notepad_issue', {
+        const issueA = await agentA.callTool('submit_finding', {
             agent_id: regA.agent_id,
             file: 'contracts/VaultA.sol',
             start_line: 10,
@@ -84,7 +84,7 @@ describe('Multi-Audit Isolation E2E', () => {
         expect(issueA.isError).not.toBe(true);
 
         // Submit finding to audit-b
-        const issueB = await agentB.callTool('submit_notepad_issue', {
+        const issueB = await agentB.callTool('submit_finding', {
             agent_id: regB.agent_id,
             file: 'contracts/VaultB.sol',
             start_line: 30,

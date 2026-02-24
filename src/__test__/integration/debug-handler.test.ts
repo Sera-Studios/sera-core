@@ -57,7 +57,7 @@ describe('DebugHandler', () => {
             const mainTools = await agentClient.listTools();
             const mainNames = mainTools.map((t: any) => t.name);
             expect(mainNames).toContain('heartbeat');
-            expect(mainNames.some((n: string) => n.includes('notepad'))).toBe(true);
+            expect(mainNames).toContain('submit_finding');
 
             // Debug port should NOT have handler tools (only debug_ + register_agent built-in)
             const debugTools = await debugClient.listTools();

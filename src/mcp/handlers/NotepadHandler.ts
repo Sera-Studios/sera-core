@@ -102,8 +102,8 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
         },
     },
     {
-        name: 'submit_notepad_issue',
-        description: 'Submit an issue to the notepad. Issues are displayed inline with severity-colored highlighting.',
+        name: 'submit_finding',
+        description: 'Submit a security finding. This is your initial report - use finalise_finding once you have confirmed the vulnerability.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -199,6 +199,20 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
         description: 'Clear all POIs, issues, and comments submitted by the hunter agent.',
         inputSchema: { type: 'object', properties: {}, required: [] },
     },
+    {
+        name: 'finalise_finding',
+        description: 'Finalise a previously submitted finding, confirming it as a validated vulnerability. Call this after you have verified the finding with evidence from the codebase.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                finding_id: {
+                    type: 'string',
+                    description: 'The finding ID returned by submit_finding',
+                },
+            },
+            required: ['finding_id'],
+        },
+    },
 ];
 
 // ============================================================================
@@ -218,8 +232,10 @@ export class NotepadHandler implements PortableMcpHandler {
         switch (toolName) {
             case 'submit_poi':
                 return this.handleSubmitNote('poi', args, ctx);
-            case 'submit_notepad_issue':
-                return this.handleSubmitIssue(args, ctx);
+            case 'submit_finding':
+                return this.handleSubmitFinding(args, ctx);
+            case 'finalise_finding':
+                return this.handleFinaliseFinding(args, ctx);
             case 'submit_comment':
                 return this.handleSubmitNote('comment', args, ctx);
             case 'submit_protocol_doc':
@@ -273,13 +289,14 @@ export class NotepadHandler implements PortableMcpHandler {
         return { note_id: id, displayed_in_editor: true };
     }
 
-    private async handleSubmitIssue(
+    private async handleSubmitFinding(
         args: Record<string, unknown>,
         ctx: HandlerContext
-    ): Promise<{ issue_id: string; displayed_in_editor: boolean }> {
+    ): Promise<{ finding_id: string; displayed_in_editor: boolean }> {
         const now = Date.now();
         const id = `issue-${now}-${Math.random().toString(36).slice(2, 8)}`;
         const submitter = this.resolveSubmitter(ctx.agentType);
+        const severity = args.severity as string;
 
         await ctx.db.write('notepad', 'notes', {
             id,
@@ -288,7 +305,7 @@ export class NotepadHandler implements PortableMcpHandler {
             startLine: args.start_line as number,
             endLine: args.end_line as number,
             title: args.title as string,
-            severity: args.severity as string,
+            severity,
             description: args.description as string,
             recommendation: args.recommendation as string,
             protocolDocRef: (args.protocol_doc_ref as string) || null,
@@ -299,19 +316,60 @@ export class NotepadHandler implements PortableMcpHandler {
             validated: 0,
         });
 
-        // Emit bridge event for critical/high issues so VS Code can show a notification
-        const severity = args.severity as string;
-        if (severity === 'critical' || severity === 'high') {
-            ctx.bridge.emit('notepad:issue-submitted', {
-                id,
-                title: args.title as string,
-                severity,
-                file: args.file as string,
-            });
+        // Emit bridge event for all findings so external services can track submissions
+        ctx.bridge.emit('finding:submitted', {
+            id,
+            title: args.title as string,
+            severity,
+            file: args.file as string,
+            submittedBy: submitter,
+        });
+
+        console.log(`[NotepadHandler] finding submitted: ${id} (${severity})`);
+        return { finding_id: id, displayed_in_editor: true };
+    }
+
+    private async handleFinaliseFinding(
+        args: Record<string, unknown>,
+        ctx: HandlerContext
+    ): Promise<{ finding_id: string; finalised: boolean }> {
+        const findingId = args.finding_id as string;
+
+        const rows = await ctx.db.sql(
+            `SELECT * FROM notepad_notes WHERE id = ? AND type = 'issue'`,
+            [findingId]
+        );
+
+        if (rows.length === 0) {
+            throw new Error(`Finding not found: ${findingId}`);
         }
 
-        console.log(`[NotepadHandler] issue submitted: ${id} (${severity})`);
-        return { issue_id: id, displayed_in_editor: true };
+        const finding = rows[0] as Record<string, any>;
+
+        if (finding.validated === 1) {
+            throw new Error(`Finding already finalised: ${findingId}`);
+        }
+
+        const now = Date.now();
+        await ctx.db.write('notepad', 'notes', {
+            ...finding,
+            validated: 1,
+            validatedAt: now,
+            updatedAt: now,
+        });
+
+        ctx.bridge.emit('finding:finalised', {
+            id: findingId,
+            title: finding.title,
+            severity: finding.severity,
+            file: finding.filePath,
+            description: finding.description,
+            recommendation: finding.recommendation,
+            submittedBy: finding.submittedBy,
+        });
+
+        console.log(`[NotepadHandler] finding finalised: ${findingId}`);
+        return { finding_id: findingId, finalised: true };
     }
 
     // ========================================================================

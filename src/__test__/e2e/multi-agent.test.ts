@@ -45,7 +45,7 @@ describe('Multi-Agent E2E', () => {
         expect(gathererReg.agent_id).toContain('gatherer');
 
         // Hunter submits an issue
-        const hunterIssue = await hunter.callTool('submit_notepad_issue', {
+        const hunterIssue = await hunter.callTool('submit_finding', {
             agent_id: hunterReg.agent_id,
             file: 'contracts/Vault.sol',
             start_line: 42,
@@ -68,7 +68,7 @@ describe('Multi-Agent E2E', () => {
         expect(gathererPoi.isError).not.toBe(true);
 
         // Hunter submits another issue
-        const hunterIssue2 = await hunter.callTool('submit_notepad_issue', {
+        const hunterIssue2 = await hunter.callTool('submit_finding', {
             agent_id: hunterReg.agent_id,
             file: 'contracts/Token.sol',
             start_line: 20,

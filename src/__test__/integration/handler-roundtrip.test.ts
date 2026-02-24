@@ -51,24 +51,20 @@ describe('Handler Roundtrips', () => {
 
             // First, discover available tools
             const tools = await client.listTools();
-            const notepadTools = tools
-                .filter(t => t.name.includes('notepad'))
-                .map(t => t.name);
+            const findingTool = tools.find(t => t.name === 'submit_finding');
+            expect(findingTool).toBeDefined();
 
-            if (notepadTools.includes('submit_notepad_issue')) {
-                const result = await client.callTool('submit_notepad_issue', {
-                    file: 'audit-repos/test/contracts/Vault.sol',
-                    start_line: 42,
-                    end_line: 42,
-                    title: 'Reentrancy Bug',
-                    severity: 'critical',
-                    description: 'External call before state update',
-                    recommendation: 'Use checks-effects-interactions pattern',
-                });
-                expect(result.content).toBeDefined();
-                expect(result.isError).not.toBe(true);
-            }
-            expect(notepadTools.length).toBeGreaterThan(0);
+            const result = await client.callTool('submit_finding', {
+                file: 'audit-repos/test/contracts/Vault.sol',
+                start_line: 42,
+                end_line: 42,
+                title: 'Reentrancy Bug',
+                severity: 'critical',
+                description: 'External call before state update',
+                recommendation: 'Use checks-effects-interactions pattern',
+            });
+            expect(result.content).toBeDefined();
+            expect(result.isError).not.toBe(true);
         });
     });
 
@@ -165,7 +161,7 @@ describe('Handler Roundtrips', () => {
             expect(names).toContain('register_agent');
             expect(names).toContain('heartbeat');
             expect(names).toContain('list_agent_registrations');
-            expect(names.some(n => n.includes('notepad'))).toBe(true);
+            expect(names).toContain('submit_finding');
         });
     });
 });
