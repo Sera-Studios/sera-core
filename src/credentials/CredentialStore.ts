@@ -15,7 +15,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'node:crypto';
+
 import { getSeraHome } from '../config';
+import { createLogger } from '../logging/Logger';
+
+const log = createLogger('credentials');
 
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
@@ -27,6 +31,7 @@ export interface StoredCredential {
     name: string;
     apiKey: string;
     createdAt: string;
+    lastUsedAt?: string;
 }
 
 export interface MaskedCredential {
@@ -65,7 +70,7 @@ export class CredentialStore {
                 fs.unlinkSync(this.legacyPath);
                 return;
             } catch {
-                console.warn('[CredentialStore] Failed to migrate legacy credentials.json');
+                log.warn('Failed to migrate legacy credentials.json');
             }
         }
 
@@ -76,7 +81,7 @@ export class CredentialStore {
                 const json = this.decrypt(encrypted);
                 this.credentials = JSON.parse(json);
             } catch {
-                console.warn('[CredentialStore] Failed to decrypt vault, starting fresh');
+                log.warn('Failed to decrypt vault, starting fresh');
                 this.credentials = [];
             }
         }
@@ -116,6 +121,34 @@ export class CredentialStore {
     /** Get a single credential by ID (full key - for internal use) */
     get(id: string): StoredCredential | null {
         return this.credentials.find(c => c.id === id) ?? null;
+    }
+
+    /** Save a credential with a caller-specified ID */
+    saveWithId(id: string, provider: string, name: string, apiKey: string): StoredCredential {
+        const credential: StoredCredential = {
+            id,
+            provider,
+            name,
+            apiKey,
+            createdAt: new Date().toISOString(),
+        };
+        this.credentials.push(credential);
+        this.flush();
+        return credential;
+    }
+
+    /** Find a credential by provider and apiKey value */
+    findByProviderAndValue(provider: string, value: string): StoredCredential | null {
+        return this.credentials.find(c => c.provider === provider && c.apiKey === value) ?? null;
+    }
+
+    /** Update a single field on a credential */
+    updateField(id: string, field: keyof StoredCredential, value: string): boolean {
+        const credential = this.credentials.find(c => c.id === id);
+        if (!credential) return false;
+        (credential as unknown as Record<string, unknown>)[field] = value;
+        this.flush();
+        return true;
     }
 
     /** List all credentials with masked keys (safe for API responses) */

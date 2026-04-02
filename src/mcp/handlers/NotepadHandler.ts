@@ -14,6 +14,9 @@ import {
     HandlerContext,
     TableSchema,
 } from '@sera/types';
+import { createLogger } from '../../logging/Logger';
+
+const log = createLogger('notepad-handler');
 
 // ============================================================================
 // TABLE SCHEMAS
@@ -115,6 +118,7 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
                 description: { type: 'string', description: 'Concise issue description' },
                 recommendation: { type: 'string', description: 'Suggested fix' },
                 protocol_doc_ref: { type: 'string', description: 'Optional slug of a protocol doc' },
+                already_submitted_by: { type: 'string', description: 'Optional auditor handle who originally submitted this finding (e.g. from an external platform)' },
             },
             required: ['file', 'start_line', 'end_line', 'title', 'severity', 'description', 'recommendation'],
         },
@@ -130,6 +134,7 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
                 end_line: { type: 'number', description: 'Ending line number (1-based)' },
                 text: { type: 'string', description: 'Brief comment text' },
                 protocol_doc_ref: { type: 'string', description: 'Optional slug of a protocol doc' },
+                already_submitted_by: { type: 'string', description: 'Optional auditor handle who originally submitted this comment (e.g. from an external platform)' },
             },
             required: ['file', 'start_line', 'end_line', 'text'],
         },
@@ -190,6 +195,7 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
             properties: {
                 note_id: { type: 'string', description: 'ID of the note to reply to' },
                 body: { type: 'string', description: 'The reply text' },
+                author: { type: 'string', description: 'Optional author name override (e.g. for syncing external platform comments)' },
             },
             required: ['note_id', 'body'],
         },
@@ -211,6 +217,54 @@ const TOOL_DEFINITIONS: McpToolDefinition[] = [
                 },
             },
             required: ['finding_id'],
+        },
+    },
+    {
+        name: 'list_findings',
+        description: 'List all submitted findings for the current audit. Returns finding ID, title, severity, file, validation status, and timestamps.',
+        inputSchema: {
+            type: 'object' as const,
+            properties: {
+                status: {
+                    type: 'string',
+                    enum: ['all', 'validated', 'unvalidated'],
+                    description: 'Filter by validation status. Default: all',
+                },
+            },
+        },
+    },
+    {
+        name: 'list_comments',
+        description: 'List all comments in the notepad. Optionally filter by file path or submitter.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                file: { type: 'string', description: 'Filter by file path (exact match)' },
+                submitter: { type: 'string', description: 'Filter by submittedBy value (e.g. "claude-hunter", "cantina-sync")' },
+            },
+        },
+    },
+    {
+        name: 'get_note',
+        description: 'Get a single note by ID with its full reply thread. Works for any note type (POI, issue, comment, question).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                note_id: { type: 'string', description: 'ID of the note to retrieve' },
+            },
+            required: ['note_id'],
+        },
+    },
+    {
+        name: 'list_notes',
+        description: 'List notes across all types (POI, issue, comment, question). Optionally filter by file path, note type, or submitter.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                file: { type: 'string', description: 'Filter by file path (exact match)' },
+                type: { type: 'string', enum: ['poi', 'issue', 'comment', 'question'], description: 'Filter by note type' },
+                submitter: { type: 'string', description: 'Filter by submittedBy value' },
+            },
         },
     },
 ];
@@ -252,6 +306,14 @@ export class NotepadHandler implements PortableMcpHandler {
                 return this.handleReplyToNote(args, ctx);
             case 'clear_hunter_data':
                 return this.handleClearHunterData(ctx);
+            case 'list_findings':
+                return this.handleListFindings(args, ctx);
+            case 'list_comments':
+                return this.handleListComments(args, ctx);
+            case 'get_note':
+                return this.handleGetNote(args, ctx);
+            case 'list_notes':
+                return this.handleListNotes(args, ctx);
             default:
                 throw new Error(`Unknown notepad tool: ${toolName}`);
         }
@@ -278,6 +340,7 @@ export class NotepadHandler implements PortableMcpHandler {
             endLine: args.end_line as number,
             text: args.text as string,
             protocolDocRef: (args.protocol_doc_ref as string) || null,
+            alreadySubmittedBy: (args.already_submitted_by as string) || null,
             submittedBy: submitter,
             createdAt: now,
             updatedAt: now,
@@ -285,7 +348,7 @@ export class NotepadHandler implements PortableMcpHandler {
             validated: 0,
         });
 
-        console.log(`[NotepadHandler] ${type} submitted: ${id}`);
+        log.info('Note submitted', { type, id });
         return { note_id: id, displayed_in_editor: true };
     }
 
@@ -309,6 +372,7 @@ export class NotepadHandler implements PortableMcpHandler {
             description: args.description as string,
             recommendation: args.recommendation as string,
             protocolDocRef: (args.protocol_doc_ref as string) || null,
+            alreadySubmittedBy: (args.already_submitted_by as string) || null,
             submittedBy: submitter,
             createdAt: now,
             updatedAt: now,
@@ -325,7 +389,7 @@ export class NotepadHandler implements PortableMcpHandler {
             submittedBy: submitter,
         });
 
-        console.log(`[NotepadHandler] finding submitted: ${id} (${severity})`);
+        log.info('Finding submitted', { id, severity });
         return { finding_id: id, displayed_in_editor: true };
     }
 
@@ -368,8 +432,183 @@ export class NotepadHandler implements PortableMcpHandler {
             submittedBy: finding.submittedBy,
         });
 
-        console.log(`[NotepadHandler] finding finalised: ${findingId}`);
+        log.info('Finding finalised', { findingId });
         return { finding_id: findingId, finalised: true };
+    }
+
+    private async handleListFindings(
+        args: Record<string, unknown>,
+        ctx: HandlerContext
+    ): Promise<{ count: number; findings: unknown[] }> {
+        const status = (args.status as string) || 'all';
+        let query = `SELECT id, title, severity, filePath, startLine, endLine,
+                            description, recommendation, submittedBy,
+                            validated, validatedAt, createdAt
+                     FROM notepad_notes WHERE type = 'issue'`;
+
+        if (status === 'validated') query += ` AND validated = 1`;
+        else if (status === 'unvalidated') query += ` AND validated = 0`;
+
+        query += ` ORDER BY createdAt DESC`;
+
+        const rows = await ctx.db.sql(query, []);
+        return { count: rows.length, findings: rows };
+    }
+
+    // ========================================================================
+    // COMMENTS & NOTES QUERIES
+    // ========================================================================
+
+    private async handleListComments(
+        args: Record<string, unknown>,
+        ctx: HandlerContext
+    ): Promise<{ count: number; comments: unknown[] }> {
+        let query = `SELECT id, filePath, startLine, endLine, text, submittedBy,
+                            alreadySubmittedBy, replies, createdAt
+                     FROM notepad_notes WHERE type = 'comment'`;
+        const params: unknown[] = [];
+
+        if (args.file) {
+            query += ` AND filePath = ?`;
+            params.push(args.file as string);
+        }
+        if (args.submitter) {
+            query += ` AND submittedBy = ?`;
+            params.push(args.submitter as string);
+        }
+
+        query += ` ORDER BY createdAt DESC`;
+
+        const rows = await ctx.db.sql(query, params);
+        return {
+            count: rows.length,
+            comments: rows.map((r: any) => ({
+                id: r.id,
+                file: r.filePath,
+                start_line: r.startLine,
+                end_line: r.endLine,
+                text: r.text,
+                submitted_by: r.submittedBy,
+                already_submitted_by: r.alreadySubmittedBy,
+                replies: r.replies ? JSON.parse(r.replies) : [],
+                created_at: r.createdAt,
+            })),
+        };
+    }
+
+    private async handleGetNote(
+        args: Record<string, unknown>,
+        ctx: HandlerContext
+    ): Promise<unknown> {
+        const noteId = args.note_id as string;
+
+        const rows = await ctx.db.sql(
+            `SELECT * FROM notepad_notes WHERE id = ?`,
+            [noteId]
+        );
+
+        if (rows.length === 0) {
+            throw new Error(`Note not found: ${noteId}`);
+        }
+
+        const row = rows[0] as any;
+        const note: Record<string, unknown> = {
+            id: row.id,
+            type: row.type,
+            file: row.filePath,
+            start_line: row.startLine,
+            end_line: row.endLine,
+            submitted_by: row.submittedBy,
+            already_submitted_by: row.alreadySubmittedBy || null,
+            resolved: row.resolved === 1,
+            validated: row.validated === 1,
+            created_at: row.createdAt,
+            updated_at: row.updatedAt,
+            replies: row.replies ? JSON.parse(row.replies) : [],
+        };
+
+        // Include type-specific fields
+        if (row.type === 'poi' || row.type === 'comment') {
+            note.text = row.text;
+        }
+        if (row.type === 'issue') {
+            note.title = row.title;
+            note.severity = row.severity;
+            note.description = row.description;
+            note.recommendation = row.recommendation;
+            note.client_response = row.clientResponse || null;
+        }
+        if (row.type === 'question') {
+            note.question = row.question;
+            note.answer = row.answer || null;
+            note.answered_by = row.answeredBy || null;
+        }
+        if (row.protocolDocRef) {
+            note.protocol_doc_ref = row.protocolDocRef;
+        }
+
+        return note;
+    }
+
+    private async handleListNotes(
+        args: Record<string, unknown>,
+        ctx: HandlerContext
+    ): Promise<{ count: number; notes: unknown[] }> {
+        let query = `SELECT id, type, filePath, startLine, endLine, text, title, severity,
+                            question, answer, submittedBy, alreadySubmittedBy,
+                            resolved, validated, replies, createdAt
+                     FROM notepad_notes WHERE 1=1`;
+        const params: unknown[] = [];
+
+        if (args.type) {
+            query += ` AND type = ?`;
+            params.push(args.type as string);
+        }
+        if (args.file) {
+            query += ` AND filePath = ?`;
+            params.push(args.file as string);
+        }
+        if (args.submitter) {
+            query += ` AND submittedBy = ?`;
+            params.push(args.submitter as string);
+        }
+
+        query += ` ORDER BY createdAt DESC`;
+
+        const rows = await ctx.db.sql(query, params);
+        return {
+            count: rows.length,
+            notes: rows.map((r: any) => {
+                const note: Record<string, unknown> = {
+                    id: r.id,
+                    type: r.type,
+                    file: r.filePath,
+                    start_line: r.startLine,
+                    end_line: r.endLine,
+                    submitted_by: r.submittedBy,
+                    already_submitted_by: r.alreadySubmittedBy || null,
+                    resolved: r.resolved === 1,
+                    validated: r.validated === 1,
+                    reply_count: r.replies ? JSON.parse(r.replies).length : 0,
+                    created_at: r.createdAt,
+                };
+
+                // Include summary fields per type
+                if (r.type === 'poi' || r.type === 'comment') {
+                    note.text = r.text;
+                }
+                if (r.type === 'issue') {
+                    note.title = r.title;
+                    note.severity = r.severity;
+                }
+                if (r.type === 'question') {
+                    note.question = r.question;
+                    note.has_answer = !!(r.answer && r.answer.trim());
+                }
+
+                return note;
+            }),
+        };
     }
 
     // ========================================================================
@@ -394,7 +633,7 @@ export class NotepadHandler implements PortableMcpHandler {
             updatedAt: now,
         });
 
-        console.log(`[NotepadHandler] Protocol doc created: ${slug}`);
+        log.info('Protocol doc created', { slug });
         return {
             slug,
             created: true,
@@ -498,7 +737,7 @@ export class NotepadHandler implements PortableMcpHandler {
             updatedAt: Date.now(),
         });
 
-        console.log(`[NotepadHandler] Question answered: ${questionId}`);
+        log.info('Question answered', { questionId });
         return { success: true, question_id: questionId };
     }
 
@@ -518,7 +757,7 @@ export class NotepadHandler implements PortableMcpHandler {
         }
 
         const note = notes[0];
-        const submitter = this.resolveSubmitter(ctx.agentType);
+        const author = (args.author as string) || this.resolveSubmitter(ctx.agentType);
         const replyId = `reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
         // Parse existing replies or start fresh
@@ -529,7 +768,7 @@ export class NotepadHandler implements PortableMcpHandler {
 
         replies.push({
             id: replyId,
-            author: submitter,
+            author,
             body: args.body as string,
             createdAt: Date.now(),
         });
@@ -540,7 +779,7 @@ export class NotepadHandler implements PortableMcpHandler {
             updatedAt: Date.now(),
         });
 
-        console.log(`[NotepadHandler] Reply added to ${noteId}: ${replyId}`);
+        log.info('Reply added', { noteId, replyId });
         return { success: true, note_id: noteId, reply_id: replyId };
     }
 
@@ -573,7 +812,7 @@ export class NotepadHandler implements PortableMcpHandler {
             await ctx.db.delete('notepad', 'protocol_docs', { submittedBy: submitter });
         }
 
-        console.log(`[NotepadHandler] Cleared ${noteCount} notes, ${docCount} docs for ${submitter}`);
+        log.info('Cleared hunter data', { noteCount, docCount, submitter });
         return { cleared_notes: noteCount, cleared_docs: docCount };
     }
 

@@ -24,6 +24,11 @@ import { DatabaseManager } from '../database/DatabaseManager';
 import { AuditRegistry } from '../database/AuditRegistry';
 import { EventBridge } from '../events/EventBridge';
 import { StorageEngine } from '../database/StorageEngine';
+import { SeraConfig } from '../config';
+import { CredentialStore } from '../credentials/CredentialStore';
+import { validateBearerAuth } from '../api/authMiddleware';
+import { MetricsCollector } from '../monitoring/MetricsCollector';
+import { createLogger } from '../logging/Logger';
 
 interface SessionState {
     sessionId: string;
@@ -66,14 +71,28 @@ export class MCPServer {
     private dbManager: DatabaseManager;
     private registry: AuditRegistry;
     private bridge: EventBridge;
+    private config?: SeraConfig;
+    private credentialStore?: CredentialStore;
+    private metricsCollector?: MetricsCollector;
+    private log = createLogger('mcp');
 
     /** Default audit slug used when agent doesn't specify workspace */
     private defaultAuditSlug: string | null = null;
 
-    constructor(dbManager: DatabaseManager, registry: AuditRegistry, bridge: EventBridge) {
+    constructor(
+        dbManager: DatabaseManager,
+        registry: AuditRegistry,
+        bridge: EventBridge,
+        config?: SeraConfig,
+        credentialStore?: CredentialStore,
+        metricsCollector?: MetricsCollector,
+    ) {
         this.dbManager = dbManager;
         this.registry = registry;
         this.bridge = bridge;
+        this.config = config;
+        this.credentialStore = credentialStore;
+        this.metricsCollector = metricsCollector;
     }
 
     // ========================================================================
@@ -87,7 +106,7 @@ export class MCPServer {
         for (const tool of handler.getToolDefinitions()) {
             this.toolRegistry.set(tool.name, handler);
         }
-        console.log(`[MCP] Handler registered (${handler.getToolDefinitions().length} tools)`);
+        this.log.info('Handler registered', { tools: handler.getToolDefinitions().length });
     }
 
     // ========================================================================
@@ -102,7 +121,7 @@ export class MCPServer {
             this.httpServer = http.createServer(async (req, res) => {
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-                res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+                res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
                 if (req.method === 'OPTIONS') {
                     res.writeHead(200);
@@ -111,6 +130,21 @@ export class MCPServer {
                 }
 
                 const url = req.url || '/';
+
+                // Auth check (skip for /health and OPTIONS)
+                if (this.config && this.credentialStore && url !== '/health') {
+                    const authResult = validateBearerAuth({
+                        authHeader: req.headers.authorization,
+                        config: this.config,
+                        credentialStore: this.credentialStore,
+                        remoteAddress: req.socket.remoteAddress || '',
+                    });
+                    if (!authResult.valid) {
+                        res.writeHead(authResult.statusCode || 401, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: authResult.error }));
+                        return;
+                    }
+                }
 
                 try {
                     // Parse URL: /mcp or /mcp/:slug
@@ -135,7 +169,7 @@ export class MCPServer {
                         res.end(JSON.stringify({ error: 'Not found' }));
                     }
                 } catch (error) {
-                    console.error('[MCP] Request error:', error);
+                    this.log.error('Request error', { error: String(error) });
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: String(error) }));
                 }
@@ -146,7 +180,7 @@ export class MCPServer {
             });
 
             this.httpServer.listen(port, () => {
-                console.log(`[sera-core] MCP server started on port ${port}`);
+                this.log.info('MCP server started', { port });
                 resolve();
             });
         });
@@ -159,7 +193,7 @@ export class MCPServer {
         return new Promise((resolve) => {
             if (this.httpServer) {
                 this.httpServer.close(() => {
-                    console.log('[sera-core] MCP server stopped');
+                    this.log.info('MCP server stopped');
                     resolve();
                 });
             } else {
@@ -285,13 +319,13 @@ export class MCPServer {
         args: Record<string, unknown>,
         urlAuditSlug: string | null
     ): Promise<McpToolResult> {
-        console.log(`[MCP] Tool call: ${toolName}${urlAuditSlug ? ` (audit=${urlAuditSlug})` : ''}`);
+        const callStart = Date.now();
+        this.log.info('Tool call', { tool: toolName, ...(urlAuditSlug ? { audit: urlAuditSlug } : {}) });
 
         try {
-            // Extract agent_id from args (injected param, not passed to handlers)
+            // Extract agent_id for session tracking (also passed through to handlers)
             const agentId = args.agent_id as string | undefined;
             const handlerArgs = { ...args };
-            delete handlerArgs.agent_id;
 
             // Resolve session from agent_id
             let session: SessionState | undefined;
@@ -354,9 +388,35 @@ export class MCPServer {
             );
 
             const result = await handler.handleToolCall(toolName, handlerArgs, context);
+
+            // Record tool call metric
+            if (this.metricsCollector) {
+                this.metricsCollector.record({
+                    timestamp: callStart,
+                    method: 'POST',
+                    path: '/mcp',
+                    statusCode: 200,
+                    durationMs: Date.now() - callStart,
+                    toolName,
+                });
+            }
+
             return this.successResult(result);
         } catch (error) {
-            console.error(`[MCP] Error in tool ${toolName}:`, error);
+            this.log.error('Tool call error', { tool: toolName, error: String(error) });
+
+            // Record error metric
+            if (this.metricsCollector) {
+                this.metricsCollector.record({
+                    timestamp: callStart,
+                    method: 'POST',
+                    path: '/mcp',
+                    statusCode: 500,
+                    durationMs: Date.now() - callStart,
+                    toolName,
+                });
+            }
+
             return this.errorResult(`Error: ${error}`);
         }
     }
@@ -410,7 +470,7 @@ export class MCPServer {
         this.sessions.set(sessionId, session);
         this.agentIdToSession.set(agentId, sessionId);
 
-        console.log(`[MCP] Agent registered: ${agentId} (${agentName} v${agentVersion}) audit=${auditSlug}`);
+        this.log.info('Agent registered', { agentId, agentName, agentVersion, audit: auditSlug });
 
         // Persist to claude_sessions table for visibility
         try {
@@ -425,7 +485,7 @@ export class MCPServer {
             });
         } catch (err) {
             // Non-fatal - session still works in memory
-            console.warn(`[MCP] Failed to persist agent session: ${err}`);
+            this.log.warn('Failed to persist agent session', { error: String(err) });
         }
 
         return this.successResult({
@@ -458,7 +518,7 @@ export class MCPServer {
                 registeredAt: null,
             };
             this.sessions.set(sessionId, session);
-            console.log(`[MCP] New session: ${sessionId} (${agentType}) audit=${auditSlug}`);
+            this.log.info('New session', { sessionId, agentType, audit: auditSlug });
         } else {
             session.lastHeartbeat = new Date();
         }
@@ -503,7 +563,7 @@ export class MCPServer {
                     this.agentIdToSession.delete(session.agentId);
                 }
                 this.sessions.delete(sessionId);
-                console.log(`[MCP] Session expired: ${sessionId}`);
+                this.log.info('Session expired', { sessionId });
             }
         }
 

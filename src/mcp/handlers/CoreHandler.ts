@@ -12,6 +12,9 @@ import {
     HandlerContext,
     TableSchema,
 } from '@sera/types';
+import { createLogger } from '../../logging/Logger';
+
+const log = createLogger('core-handler');
 
 // Table schemas matching SessionBridgeStorageIntegration
 const SESSIONBRIDGE_SCHEMAS: TableSchema[] = [
@@ -234,7 +237,7 @@ export class CoreHandler implements PortableMcpHandler {
                 promptCount: 0,
                 totalTokens: 0,
             });
-            console.log(`[CoreHandler] New session: ${sessionId} (${agentType})`);
+            log.info('New session', { sessionId, agentType });
         } else {
             await ctx.db.write('sessionbridge', 'claude_sessions', {
                 ...sessions[0],
@@ -283,7 +286,7 @@ export class CoreHandler implements PortableMcpHandler {
             transcriptPath: (args.transcript_path as string) || null,
         });
 
-        console.log(`[CoreHandler] Prompt logged: ${promptId} (${args.agent_type})`);
+        log.info('Prompt logged', { promptId, agentType: String(args.agent_type) });
         return promptId;
     }
 
@@ -302,7 +305,7 @@ export class CoreHandler implements PortableMcpHandler {
             createdAt: new Date().toISOString(),
         });
 
-        console.log(`[CoreHandler] Contract map submitted: ${mapId}`);
+        log.info('Contract map submitted', { mapId });
         return { map_id: mapId };
     }
 
@@ -323,7 +326,7 @@ export class CoreHandler implements PortableMcpHandler {
             createdAt: new Date().toISOString(),
         });
 
-        console.log(`[CoreHandler] Flow diagram submitted: ${diagramId}`);
+        log.info('Flow diagram submitted', { diagramId });
         return { diagram_id: diagramId };
     }
 }

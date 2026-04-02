@@ -25,6 +25,9 @@ import {
     McpToolDefinition,
     HandlerContext,
 } from '@sera/types';
+import { createLogger } from '../../logging/Logger';
+
+const log = createLogger('trace-handler');
 
 // ============================================================================
 // CONSTANTS
@@ -631,7 +634,7 @@ export class TraceHandler implements PortableMcpHandler {
             return existing;
         }
 
-        console.log(`[TraceHandler] Building adjacency cache for repo: ${repoId}`);
+        log.info('Building adjacency cache', { repoId });
 
         const forward = new Map<string, string[]>();
         const reverse = new Map<string, string[]>();
@@ -664,10 +667,7 @@ export class TraceHandler implements PortableMcpHandler {
         const cache: AdjacencyCache = { forward, reverse, timestamp: Date.now() };
         this.adjacencyCache.set(repoId, cache);
 
-        console.log(
-            `[TraceHandler] Adjacency cache built: ${allEdges.length} edges, ` +
-            `${forward.size} sources, ${reverse.size} targets`
-        );
+        log.info('Adjacency cache built', { edges: allEdges.length, sources: forward.size, targets: reverse.size });
         return cache;
     }
 

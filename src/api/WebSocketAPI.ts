@@ -8,6 +8,7 @@
 
 import { WebSocket, WebSocketServer, RawData } from 'ws';
 import { Server as HttpServer } from 'http';
+
 import {
     ClientMessage,
     ConnectMessage,
@@ -28,6 +29,9 @@ import {
 import { DatabaseManager } from '../database/DatabaseManager';
 import { AuditRegistry } from '../database/AuditRegistry';
 import { EventBridge } from '../events/EventBridge';
+import { createLogger } from '../logging/Logger';
+
+const log = createLogger('ws');
 
 interface ClientState {
     clientId: string;
@@ -133,7 +137,7 @@ export class WebSocketAPI {
                         break;
                 }
             } catch (err) {
-                console.error('[sera-core] WebSocket message error:', err);
+                log.error('WebSocket message error', { error: String(err) });
                 ws.send(JSON.stringify({ type: 'error', error: String(err) }));
             }
         });
@@ -142,12 +146,12 @@ export class WebSocketAPI {
             if (clientState) {
                 this.bridge.unsubscribeClient(clientState.clientId);
                 this.clients.delete(clientState.clientId);
-                console.log(`[sera-core] Client disconnected: ${clientState.clientId}`);
+                log.info('Client disconnected', { clientId: clientState.clientId });
             }
         });
 
         ws.on('error', (err) => {
-            console.error('[sera-core] WebSocket error:', err);
+            log.error('WebSocket error', { error: String(err) });
         });
     }
 
@@ -165,7 +169,7 @@ export class WebSocketAPI {
         };
 
         this.clients.set(msg.clientId, state);
-        console.log(`[sera-core] Client connected: ${msg.clientId} (${msg.clientType}) workspace=${msg.workspacePath}`);
+        log.info('Client connected', { clientId: msg.clientId, clientType: msg.clientType, workspace: msg.workspacePath });
 
         // Look up workspace in registry
         const slug = this.registry.lookupWorkspace(msg.workspacePath);
@@ -237,7 +241,7 @@ export class WebSocketAPI {
                 fs.copyFileSync(msg.migrateFrom, dbPath);
                 // Rename source as backup
                 fs.renameSync(msg.migrateFrom, msg.migrateFrom + '.migrated');
-                console.log(`[sera-core] Migrated database from ${msg.migrateFrom} to ${dbPath}`);
+                log.info('Migrated database', { from: msg.migrateFrom, to: dbPath });
             }
         }
 

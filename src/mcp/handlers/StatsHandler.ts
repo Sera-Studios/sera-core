@@ -14,6 +14,9 @@ import {
     HandlerContext,
     TableSchema,
 } from '@sera/types';
+import { createLogger } from '../../logging/Logger';
+
+const log = createLogger('stats-handler');
 
 // ============================================================================
 // TABLE SCHEMAS
@@ -185,7 +188,7 @@ export class StatsHandler implements PortableMcpHandler {
             nonce: args.nonce as number,
         });
 
-        console.log(`[StatsHandler] Stats saved: time=${args.totalTime}, points=${args.totalPoints}, nonce=${args.nonce}`);
+        log.info('Stats saved', { totalTime: args.totalTime as number, totalPoints: args.totalPoints as number, nonce: args.nonce as number });
         return { success: true };
     }
 
@@ -230,7 +233,7 @@ export class StatsHandler implements PortableMcpHandler {
             metadata: (args.metadata as string) || null,
         });
 
-        console.log(`[StatsHandler] Session saved: nonce=${nonce}, duration=${args.duration}`);
+        log.info('Session saved', { nonce, duration: args.duration as number });
         return { success: true, nonce };
     }
 
@@ -282,7 +285,7 @@ export class StatsHandler implements PortableMcpHandler {
             strategyMetadata: (args.strategyMetadata as string) || null,
         });
 
-        console.log(`[StatsHandler] Intervention saved: ${id} (${args.outcome})`);
+        log.info('Intervention saved', { id, outcome: String(args.outcome) });
         return { success: true, id };
     }
 }

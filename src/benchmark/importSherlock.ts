@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { BenchmarkContest, KnownFinding } from '@sera/types';
 import { BenchmarkStore } from './BenchmarkStore';
+import { suggestTags, suggestDifficulty } from './suggestTags';
 
 interface RawContest {
     id: string;
@@ -67,9 +68,11 @@ export function importSherlockIndex(
     // Import contests
     const rawContests: RawContest[] = JSON.parse(fs.readFileSync(contestsFile, 'utf-8'));
     for (const raw of rawContests) {
+        const source = raw.source || 'sherlock';
         const contest: BenchmarkContest = {
             id: raw.id,
-            source: (raw.source || 'sherlock') as 'sherlock' | 'code4rena',
+            source,
+            language: 'solidity',
             externalId: raw.id,
             name: raw.name,
             sponsor: raw.sponsor || raw.name,
@@ -83,6 +86,8 @@ export function importSherlockIndex(
             scopeDescription: raw.scope_description,
             totalFindings: raw.total_findings,
             findingsBySeverity: raw.findings_by_severity,
+            tags: suggestTags({ source, language: 'solidity', name: raw.name, totalFindings: raw.total_findings }),
+            difficulty: suggestDifficulty(raw.total_findings),
         };
         store.upsertContest(contest);
         contestCount++;

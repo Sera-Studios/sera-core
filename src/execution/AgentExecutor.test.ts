@@ -48,6 +48,7 @@ function registerScriptAgent(
         name: `Test Agent ${id}`,
         version: '0.1.0',
         description: 'Test agent',
+        roles: ['execution'],
         execution: {
             type: 'script',
             interpreter: 'python3',
@@ -227,6 +228,7 @@ describe('AgentExecutor', () => {
             name: 'Docker Agent',
             version: '0.1.0',
             description: 'test',
+            roles: ['execution'],
             execution: { type: 'docker', image: 'test' },
             interface: { inputs: [], outputs: [] },
             defaultTimeout: 30,

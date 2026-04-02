@@ -38,7 +38,7 @@ describe('TestHarness', () => {
 
         // Verify health endpoint responds
         const health = await httpGet(`${testnet.clientUrl}/api/health`);
-        expect(health.status).toBe('ok');
+        expect(health.status).toBe('healthy');
 
         // Verify MCP endpoint responds to initialize
         const mcpResult = await testnet.mcpCall('initialize', {

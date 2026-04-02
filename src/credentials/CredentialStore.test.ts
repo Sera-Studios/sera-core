@@ -215,4 +215,63 @@ describe('CredentialStore', () => {
         // Both credentials should be readable
         expect(store2.list()).toHaveLength(2);
     });
+
+    // --- API key methods ---
+
+    it('saveWithId uses the provided ID', () => {
+        const store = new CredentialStore(tmpDir);
+        const cred = store.saveWithId('my-custom-id', 'sera-auth', 'Dev Laptop', 'hash123');
+
+        expect(cred.id).toBe('my-custom-id');
+        expect(cred.provider).toBe('sera-auth');
+        expect(cred.name).toBe('Dev Laptop');
+        expect(store.get('my-custom-id')).not.toBeNull();
+    });
+
+    it('findByProviderAndValue returns matching credential', () => {
+        const store = new CredentialStore(tmpDir);
+        store.saveWithId('key-1', 'sera-auth', 'Key 1', 'hash-aaa');
+        store.saveWithId('key-2', 'sera-auth', 'Key 2', 'hash-bbb');
+        store.save('anthropic', 'Other', 'hash-aaa'); // same value, different provider
+
+        const found = store.findByProviderAndValue('sera-auth', 'hash-aaa');
+        expect(found).not.toBeNull();
+        expect(found!.id).toBe('key-1');
+    });
+
+    it('findByProviderAndValue returns null on no match', () => {
+        const store = new CredentialStore(tmpDir);
+        store.saveWithId('key-1', 'sera-auth', 'Key 1', 'hash-aaa');
+
+        expect(store.findByProviderAndValue('sera-auth', 'nonexistent')).toBeNull();
+        expect(store.findByProviderAndValue('other-provider', 'hash-aaa')).toBeNull();
+    });
+
+    it('updateField updates the field and persists', () => {
+        const store1 = new CredentialStore(tmpDir);
+        store1.saveWithId('key-1', 'sera-auth', 'Key 1', 'hash-aaa');
+
+        const updated = store1.updateField('key-1', 'lastUsedAt', '2026-03-04T12:00:00Z');
+        expect(updated).toBe(true);
+
+        // Reload and verify
+        const store2 = new CredentialStore(tmpDir);
+        const cred = store2.get('key-1');
+        expect(cred!.lastUsedAt).toBe('2026-03-04T12:00:00Z');
+    });
+
+    it('updateField returns false for nonexistent ID', () => {
+        const store = new CredentialStore(tmpDir);
+        expect(store.updateField('nonexistent', 'lastUsedAt', 'now')).toBe(false);
+    });
+
+    it('lastUsedAt survives save/load roundtrip', () => {
+        const store1 = new CredentialStore(tmpDir);
+        store1.saveWithId('key-1', 'sera-auth', 'Key 1', 'hash');
+        store1.updateField('key-1', 'lastUsedAt', '2026-01-01T00:00:00Z');
+
+        const store2 = new CredentialStore(tmpDir);
+        const cred = store2.get('key-1');
+        expect(cred!.lastUsedAt).toBe('2026-01-01T00:00:00Z');
+    });
 });

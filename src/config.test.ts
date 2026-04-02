@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { loadConfig, ensureSeraHome, getSeraHome } from './config';
+import { loadConfig, ensureSeraHome, getSeraHome, patchConfig } from './config';
 
 describe('config', () => {
     let tmpDir: string;
@@ -112,6 +112,101 @@ describe('config', () => {
         it('resolves log file path relative to sera home', () => {
             const config = loadConfig(tmpDir);
             expect(config.logging.file).toContain(tmpDir);
+        });
+
+        it('default config has auth disabled with localhost bypass', () => {
+            const config = loadConfig(tmpDir);
+            expect(config.auth).toEqual({ enabled: false, skipLocalhost: true });
+        });
+
+        it('user config merges auth overrides correctly', () => {
+            fs.writeFileSync(
+                path.join(tmpDir, 'config.json'),
+                JSON.stringify({ auth: { enabled: true, skipLocalhost: false } }),
+            );
+            const config = loadConfig(tmpDir);
+            expect(config.auth).toEqual({ enabled: true, skipLocalhost: false });
+        });
+
+        it('partial auth config merges with defaults', () => {
+            fs.writeFileSync(
+                path.join(tmpDir, 'config.json'),
+                JSON.stringify({ auth: { enabled: true } }),
+            );
+            const config = loadConfig(tmpDir);
+            expect(config.auth!.enabled).toBe(true);
+            expect(config.auth!.skipLocalhost).toBe(true);
+        });
+
+        it('default config has logging.format = text', () => {
+            const config = loadConfig(tmpDir);
+            expect(config.logging.format).toBe('text');
+        });
+
+        it('default config has monitoring.alerts.enabled = false', () => {
+            const config = loadConfig(tmpDir);
+            expect(config.monitoring?.alerts?.enabled).toBe(false);
+            expect(config.monitoring?.alerts?.thresholds?.errorRatePerMinute).toBe(10);
+            expect(config.monitoring?.alerts?.thresholds?.avgLatencyMs).toBe(5000);
+            expect(config.monitoring?.alerts?.thresholds?.consecutiveFailedHealthChecks).toBe(3);
+        });
+
+        it('user config merges monitoring overrides correctly', () => {
+            fs.writeFileSync(
+                path.join(tmpDir, 'config.json'),
+                JSON.stringify({
+                    monitoring: {
+                        alerts: {
+                            enabled: true,
+                            webhookUrl: 'https://hooks.slack.com/test',
+                            thresholds: { errorRatePerMinute: 5 },
+                        },
+                    },
+                }),
+            );
+            const config = loadConfig(tmpDir);
+            expect(config.monitoring?.alerts?.enabled).toBe(true);
+            expect(config.monitoring?.alerts?.webhookUrl).toBe('https://hooks.slack.com/test');
+            expect(config.monitoring?.alerts?.thresholds?.errorRatePerMinute).toBe(5);
+            // Default thresholds preserved
+            expect(config.monitoring?.alerts?.thresholds?.avgLatencyMs).toBe(5000);
+        });
+    });
+
+    describe('patchConfig', () => {
+        it('writes config when no file exists', () => {
+            patchConfig(tmpDir, { auth: { enabled: true, skipLocalhost: true } });
+            const configPath = path.join(tmpDir, 'config.json');
+            expect(fs.existsSync(configPath)).toBe(true);
+            const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            expect(written.auth.enabled).toBe(true);
+        });
+
+        it('preserves existing fields when patching', () => {
+            fs.writeFileSync(
+                path.join(tmpDir, 'config.json'),
+                JSON.stringify({ ports: { client: 9999 } }),
+            );
+            patchConfig(tmpDir, { auth: { enabled: true, skipLocalhost: false } });
+            const written = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
+            expect(written.ports.client).toBe(9999);
+            expect(written.auth.enabled).toBe(true);
+        });
+
+        it('merges nested auth fields', () => {
+            fs.writeFileSync(
+                path.join(tmpDir, 'config.json'),
+                JSON.stringify({ auth: { enabled: false, skipLocalhost: true } }),
+            );
+            patchConfig(tmpDir, { auth: { enabled: true } });
+            const written = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
+            expect(written.auth.enabled).toBe(true);
+            expect(written.auth.skipLocalhost).toBe(true);
+        });
+
+        it('does nothing when patch is undefined', () => {
+            patchConfig(tmpDir, undefined);
+            expect(fs.existsSync(path.join(tmpDir, 'config.json'))).toBe(false);
         });
     });
 });

@@ -10,7 +10,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { AgentRegistration } from '@sera/types';
+
+import { AgentRegistration, AgentRole } from '@sera/types';
+
+import { createLogger } from '../logging/Logger';
+
+const log = createLogger('agents');
 
 export class AgentRegistrationStore {
     private registrations: Map<string, AgentRegistration> = new Map();
@@ -34,7 +39,7 @@ export class AgentRegistrationStore {
      */
     private loadFromDisk(): void {
         if (!fs.existsSync(this.diskDir)) {
-            console.warn(`[RegistrationStore] Agents directory not found: ${this.diskDir}`);
+            log.warn('Agents directory not found', { dir: this.diskDir });
             return;
         }
 
@@ -46,18 +51,23 @@ export class AgentRegistrationStore {
                 const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
 
                 if (!raw.id || !raw.name || !raw.execution) {
-                    console.warn(`[RegistrationStore] Skipping invalid file: ${file}`);
+                    log.warn('Skipping invalid file', { file });
                     continue;
                 }
 
+                // Backward compat: default missing roles to ['execution']
+                if (!raw.roles) {
+                    raw.roles = ['execution'];
+                }
+
                 this.registrations.set(raw.id, raw as AgentRegistration);
-                console.log(`[RegistrationStore] Loaded: ${raw.id} (${raw.name})`);
+                log.info('Loaded registration', { id: raw.id, name: raw.name });
             } catch (err) {
-                console.error(`[RegistrationStore] Failed to load ${file}:`, err);
+                log.error('Failed to load registration file', { file, error: String(err) });
             }
         }
 
-        console.log(`[RegistrationStore] ${this.registrations.size} agent registrations loaded`);
+        log.info('Agent registrations loaded', { count: this.registrations.size });
     }
 
     /**
@@ -78,6 +88,15 @@ export class AgentRegistrationStore {
     }
 
     /**
+     * Get registrations that include a specific role.
+     * @param role - Role to filter by
+     * @returns Array of registrations whose roles array includes the given role
+     */
+    getByRole(role: AgentRole): AgentRegistration[] {
+        return this.getAll().filter(r => r.roles.includes(role));
+    }
+
+    /**
      * List all registration IDs.
      * @returns Array of IDs
      */
@@ -92,7 +111,7 @@ export class AgentRegistrationStore {
      */
     register(registration: AgentRegistration, persist = false): void {
         this.registrations.set(registration.id, registration);
-        console.log(`[RegistrationStore] Registered: ${registration.id}`);
+        log.info('Registered', { id: registration.id });
 
         if (persist) {
             const filePath = path.join(this.diskDir, `${registration.id}.json`);
@@ -108,7 +127,7 @@ export class AgentRegistrationStore {
     unregister(id: string): boolean {
         const removed = this.registrations.delete(id);
         if (removed) {
-            console.log(`[RegistrationStore] Unregistered: ${id}`);
+            log.info('Unregistered', { id });
         }
         return removed;
     }
@@ -154,7 +173,7 @@ export class AgentRegistrationStore {
             fs.writeFileSync(filePath, artifact.content);
         }
 
-        console.log(`[RegistrationStore] Wrote ${artifacts.length} artifacts for: ${id}`);
+        log.info('Wrote artifacts', { id, count: artifacts.length });
         return artifactDir;
     }
 }

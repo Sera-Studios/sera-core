@@ -20,6 +20,7 @@ export const HUNTER_REGISTRATION: AgentRegistration = {
     name: 'Hunter',
     version: '0.1.0',
     description: 'Vulnerability detection agent for smart contract security audits',
+    roles: ['execution'],
     execution: {
         type: 'claude-code',
         roleFile: '../roles/hunter.md',
@@ -57,6 +58,7 @@ export const CARTOGRAPHER_REGISTRATION: AgentRegistration = {
     name: 'Cartographer',
     version: '0.1.0',
     description: 'Code mapping and architecture analysis agent',
+    roles: ['execution'],
     execution: {
         type: 'claude-code',
         roleFile: '../roles/cartographer.md',

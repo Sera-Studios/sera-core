@@ -11,13 +11,19 @@
  *   sera-core list           List all audits
  *   sera-core health         Check daemon health
  *   sera-core migrate <path> Migrate workspace database to sera-core
+ *   sera-core seed-resources <dir> Seed audit knowledge resources from filesystem
+ *   sera-core auth generate  Generate a new API key
+ *   sera-core auth list      List all API keys
+ *   sera-core auth revoke    Revoke an API key
+ *   sera-core auth enable    Enable authentication
+ *   sera-core auth disable   Disable authentication
  */
 
 import * as http from 'http';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
-import { loadConfig, getSeraHome } from './config';
+import { loadConfig, getSeraHome, patchConfig } from './config';
 
 const config = loadConfig();
 const PID_FILE = path.join(getSeraHome(), 'sera-core.pid');
@@ -48,6 +54,12 @@ async function main(): Promise<void> {
             break;
         case 'migrate':
             await migrateWorkspace(args[1]);
+            break;
+        case 'seed-resources':
+            await seedResourcesCmd(args[1]);
+            break;
+        case 'auth':
+            await handleAuth(args.slice(1));
             break;
         default:
             printUsage();
@@ -232,6 +244,164 @@ async function migrateWorkspace(workspacePath?: string): Promise<void> {
     console.log(`  Backup:   ${backupPath}`);
 }
 
+async function seedResourcesCmd(sourceDir?: string): Promise<void> {
+    if (!sourceDir) {
+        console.error('Usage: sera-core seed-resources <resources-dir>');
+        console.error('  Seeds audit knowledge resources from the filesystem into the database');
+        process.exit(1);
+    }
+
+    const resolved = path.resolve(sourceDir);
+    if (!fs.existsSync(resolved)) {
+        console.error(`Directory not found: ${resolved}`);
+        process.exit(1);
+    }
+
+    const { ensureSeraHome } = await import('./config');
+    ensureSeraHome();
+
+    const { ResourceStore } = await import('./resources/ResourceStore');
+    const { seedResources } = await import('./resources/seedResources');
+
+    const store = new ResourceStore(undefined);
+    await store.initialize();
+
+    try {
+        const result = seedResources(store, resolved);
+        console.log(`Seed complete: ${result.seeded} resources seeded, ${result.skipped} skipped`);
+        if (result.errors.length > 0) {
+            console.log(`Errors (${result.errors.length}):`);
+            for (const err of result.errors) {
+                console.log(`  - ${err}`);
+            }
+        }
+        console.log(`Total resources in database: ${store.count()}`);
+    } finally {
+        await store.shutdown();
+    }
+}
+
+// ============================================================================
+// AUTH COMMANDS
+// ============================================================================
+
+async function handleAuth(args: string[]): Promise<void> {
+    const subcommand = args[0];
+
+    switch (subcommand) {
+        case 'generate':
+            await authGenerate(args.slice(1));
+            break;
+        case 'list':
+            await authList();
+            break;
+        case 'revoke':
+            await authRevoke(args[1]);
+            break;
+        case 'enable':
+            await authEnable();
+            break;
+        case 'disable':
+            await authDisable();
+            break;
+        default:
+            console.log('Usage: sera-core auth <command>\n');
+            console.log('Commands:');
+            console.log('  generate [--label <name>]  Generate a new API key');
+            console.log('  list                       List all API keys');
+            console.log('  revoke <id>                Revoke an API key');
+            console.log('  enable                     Enable authentication');
+            console.log('  disable                    Disable authentication');
+            break;
+    }
+}
+
+async function authGenerate(args: string[]): Promise<void> {
+    const { ensureSeraHome } = await import('./config');
+    ensureSeraHome();
+
+    const { CredentialStore } = await import('./credentials/CredentialStore');
+    const { generateApiKey, hashApiKey } = await import('./api/authMiddleware');
+
+    // Parse --label flag
+    let label = 'default';
+    const labelIdx = args.indexOf('--label');
+    if (labelIdx !== -1 && args[labelIdx + 1]) {
+        label = args[labelIdx + 1];
+    }
+
+    const store = new CredentialStore();
+    const key = generateApiKey();
+    const hash = hashApiKey(key);
+
+    store.saveWithId(label, 'sera-auth', label, hash);
+
+    console.log(`Generated API key for "${label}":\n`);
+    console.log(`  ${key}\n`);
+    console.log('Save this key - it cannot be retrieved later.');
+
+    if (!config.auth?.enabled) {
+        console.log('Auth is currently disabled. Enable with: sera-core auth enable');
+    }
+}
+
+async function authList(): Promise<void> {
+    const { ensureSeraHome } = await import('./config');
+    ensureSeraHome();
+
+    const { CredentialStore } = await import('./credentials/CredentialStore');
+    const store = new CredentialStore();
+    const keys = store.getByProvider('sera-auth');
+
+    if (keys.length === 0) {
+        console.log('No API keys. Generate one with: sera-core auth generate');
+        return;
+    }
+
+    console.log('ID            Label        Created              Last Used');
+    for (const key of keys) {
+        const lastUsed = key.lastUsedAt || 'never';
+        const created = key.createdAt.substring(0, 19).replace('T', ' ');
+        const lastUsedFmt = lastUsed === 'never' ? 'never' : lastUsed.substring(0, 19).replace('T', ' ');
+        console.log(`${key.id.padEnd(14)}${key.name.padEnd(13)}${created.padEnd(21)}${lastUsedFmt}`);
+    }
+}
+
+async function authRevoke(id?: string): Promise<void> {
+    if (!id) {
+        console.error('Usage: sera-core auth revoke <id>');
+        process.exit(1);
+    }
+
+    const { ensureSeraHome } = await import('./config');
+    ensureSeraHome();
+
+    const { CredentialStore } = await import('./credentials/CredentialStore');
+    const store = new CredentialStore();
+    const removed = store.remove(id);
+
+    if (removed) {
+        console.log(`Revoked API key "${id}".`);
+    } else {
+        console.error(`API key "${id}" not found.`);
+        process.exit(1);
+    }
+}
+
+async function authEnable(): Promise<void> {
+    patchConfig(undefined, { auth: { enabled: true } });
+    const refreshed = loadConfig();
+    console.log('Authentication enabled. Remote connections now require an API key.');
+    if (refreshed.auth?.skipLocalhost) {
+        console.log('Localhost connections are bypassed (change with config or sera-core auth no-skip-localhost).');
+    }
+}
+
+async function authDisable(): Promise<void> {
+    patchConfig(undefined, { auth: { enabled: false } });
+    console.log('Authentication disabled. All connections are accepted.');
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -284,6 +454,13 @@ function printUsage(): void {
     console.log('  list               List all audits with metadata');
     console.log('  health             Show health check JSON');
     console.log('  migrate <path>     Migrate workspace database to sera-core');
+    console.log('  seed-resources <dir> Seed audit knowledge resources from filesystem');
+    console.log('  auth <subcommand>  Manage API key authentication');
+    console.log('    generate         Generate a new API key');
+    console.log('    list             List all API keys');
+    console.log('    revoke <id>      Revoke an API key');
+    console.log('    enable           Enable authentication');
+    console.log('    disable          Disable authentication');
 }
 
 main().catch((err) => {

@@ -12,6 +12,9 @@ import {
     HandlerContext,
     TableSchema,
 } from '@sera/types';
+import { createLogger } from '../../logging/Logger';
+
+const log = createLogger('quiz-handler');
 
 const QUIZ_SCHEMA: TableSchema = {
     name: 'quiz_questions',
@@ -143,7 +146,7 @@ export class QuizHandler implements PortableMcpHandler {
             createdAt: new Date().toISOString(),
         });
 
-        console.log(`[QuizHandler] Question submitted: ${questionId}`);
+        log.info('Question submitted', { questionId });
         return { question_id: questionId };
     }
 
@@ -189,7 +192,7 @@ export class QuizHandler implements PortableMcpHandler {
             gradedAt: new Date().toISOString(),
         });
 
-        console.log(`[QuizHandler] Graded ${questionId}: ${score}/100`);
+        log.info('Graded question', { questionId, score });
         return { success: true, question_id: questionId, score };
     }
 }

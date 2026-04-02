@@ -8,9 +8,15 @@
  */
 
 import * as child_process from 'child_process';
+import * as path from 'path';
+
 import type { AgentRegistration, AgentHandle, AgentLaunchParams, ScriptExecution } from '@sera/types';
+
 import type { CredentialStore } from '../credentials/CredentialStore';
 import type { AgentRegistrationStore } from '../agents/AgentRegistrationStore';
+import { createLogger } from '../logging/Logger';
+
+const log = createLogger('agent-executor');
 
 interface ExecutionRecord {
     handle: AgentHandle;
@@ -66,13 +72,19 @@ export class AgentExecutor {
         this.executions.set(instanceId, record);
 
         const proc = child_process.spawn(scriptExec.interpreter, args, {
+            cwd: path.dirname(scriptExec.scriptPath),
             env: { ...process.env, ...env },
-            stdio: ['ignore', 'pipe', 'pipe'],
+            stdio: ['pipe', 'pipe', 'pipe'],
         });
 
         record.process = proc;
         handle.pid = proc.pid;
         handle.status = 'running';
+
+        // Close stdin so child doesn't hang waiting for input.
+        // We use 'pipe' instead of 'ignore' because the claude_agent_sdk
+        // spawns claude CLI as a subprocess that needs a valid stdin fd.
+        proc.stdin!.end();
 
         proc.stdout!.on('data', (chunk: Buffer) => {
             record.stdout += chunk.toString();
@@ -106,7 +118,7 @@ export class AgentExecutor {
                 handle.error = `Process exited with code ${code}`;
             }
             record.process = undefined;
-            console.log(`[AgentExecutor] ${instanceId} finished: status=${handle.status} exitCode=${code}`);
+            log.info('Agent finished', { instanceId, status: handle.status, exitCode: code });
         });
 
         proc.on('error', (err) => {
@@ -118,10 +130,10 @@ export class AgentExecutor {
             handle.status = 'failed';
             handle.error = err.message;
             record.process = undefined;
-            console.error(`[AgentExecutor] ${instanceId} spawn error: ${err.message}`);
+            log.error('Spawn error', { instanceId, error: err.message });
         });
 
-        console.log(`[AgentExecutor] Launched ${instanceId} (pid=${proc.pid}): ${scriptExec.interpreter} ${args.join(' ')}`);
+        log.info('Launched agent', { instanceId, pid: proc.pid, interpreter: scriptExec.interpreter, args: args.join(' ') });
         return { ...handle };
     }
 
@@ -198,7 +210,7 @@ export class AgentExecutor {
         for (const cred of reg.requiredCredentials ?? []) {
             const stored = this.credentialStore.get(cred.credentialId);
             if (!stored) {
-                console.warn(`[AgentExecutor] Credential not found: ${cred.credentialId} (envVar: ${cred.envVar})`);
+                log.warn('Credential not found', { credentialId: cred.credentialId, envVar: cred.envVar });
                 continue;
             }
             env[cred.envVar] = stored.apiKey;

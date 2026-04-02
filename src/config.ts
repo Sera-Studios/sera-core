@@ -11,6 +11,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+import { createLogger } from './logging/Logger';
+
+const log = createLogger('config');
+
 export interface SeraConfig {
     ports: {
         client: number;
@@ -18,6 +22,7 @@ export interface SeraConfig {
     };
     logging: {
         level: 'debug' | 'info' | 'warn' | 'error';
+        format: 'json' | 'text';
         file: string;
         maxSize: string;
         maxFiles: number;
@@ -25,6 +30,21 @@ export interface SeraConfig {
     database: {
         flushIntervalMs: number;
         backupOnMigrate: boolean;
+    };
+    auth?: {
+        enabled: boolean;
+        skipLocalhost: boolean;
+    };
+    monitoring?: {
+        alerts?: {
+            enabled: boolean;
+            webhookUrl?: string;
+            thresholds?: {
+                errorRatePerMinute?: number;
+                avgLatencyMs?: number;
+                consecutiveFailedHealthChecks?: number;
+            };
+        };
     };
 }
 
@@ -42,6 +62,7 @@ function buildDefaultConfig(seraHome: string): SeraConfig {
         },
         logging: {
             level: 'info',
+            format: 'text',
             file: path.join(seraHome, 'logs', 'sera-core.log'),
             maxSize: '10m',
             maxFiles: 5,
@@ -49,6 +70,20 @@ function buildDefaultConfig(seraHome: string): SeraConfig {
         database: {
             flushIntervalMs: 30000,
             backupOnMigrate: true,
+        },
+        auth: {
+            enabled: false,
+            skipLocalhost: true,
+        },
+        monitoring: {
+            alerts: {
+                enabled: false,
+                thresholds: {
+                    errorRatePerMinute: 10,
+                    avgLatencyMs: 5000,
+                    consecutiveFailedHealthChecks: 3,
+                },
+            },
         },
     };
 }
@@ -68,7 +103,7 @@ export function loadConfig(seraHomeOverride?: string): SeraConfig {
             const userConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
             return deepMerge(defaults, userConfig);
         } catch (err) {
-            console.warn(`[sera-core] Failed to load config from ${configPath}: ${err}`);
+            log.warn('Failed to load config', { configPath, error: String(err) });
         }
     }
 
@@ -100,6 +135,29 @@ export function ensureSeraHome(seraHomeOverride?: string): void {
  */
 export function getSeraHome(override?: string): string {
     return resolveSeraHome(override);
+}
+
+/**
+ * Patch the config file with partial updates (read-modify-write)
+ * @param seraHomeOverride - Use this directory instead of ~/.sera
+ * @param patch - Partial config to merge into existing config file
+ */
+export function patchConfig(seraHomeOverride?: string, patch?: Record<string, unknown>): void {
+    if (!patch) return;
+    const seraHome = resolveSeraHome(seraHomeOverride);
+    const configPath = path.join(seraHome, 'config.json');
+
+    let existing: Record<string, unknown> = {};
+    if (fs.existsSync(configPath)) {
+        try {
+            existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        } catch {
+            // Start fresh if config is corrupted
+        }
+    }
+
+    const merged = deepMerge(existing, patch);
+    fs.writeFileSync(configPath, JSON.stringify(merged, null, 2), 'utf-8');
 }
 
 function deepMerge(target: any, source: any): any {

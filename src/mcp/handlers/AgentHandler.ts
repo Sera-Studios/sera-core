@@ -10,6 +10,7 @@ import {
     PortableMcpHandler,
     McpToolDefinition,
     HandlerContext,
+    AgentRole,
 } from '@sera/types';
 import { AgentRegistrationStore } from '../../agents/AgentRegistrationStore';
 
@@ -20,10 +21,16 @@ import { AgentRegistrationStore } from '../../agents/AgentRegistrationStore';
 const AGENT_TOOLS: McpToolDefinition[] = [
     {
         name: 'list_agent_registrations',
-        description: 'List all registered agent definitions with their execution type and interface',
+        description: 'List registered agent definitions with their execution type and interface. Optionally filter by role.',
         inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+                role: {
+                    type: 'string',
+                    enum: ['execution', 'evaluation'],
+                    description: 'Filter to agents that include this role',
+                },
+            },
         },
     },
 ];
@@ -45,25 +52,28 @@ export class AgentHandler implements PortableMcpHandler {
 
     async handleToolCall(
         toolName: string,
-        _args: Record<string, unknown>,
+        args: Record<string, unknown>,
         _ctx: HandlerContext
     ): Promise<unknown> {
         switch (toolName) {
             case 'list_agent_registrations':
-                return this.handleListRegistrations();
+                return this.handleListRegistrations(args.role as string | undefined);
 
             default:
                 throw new Error(`Unknown agent tool: ${toolName}`);
         }
     }
 
-    private handleListRegistrations(): unknown {
-        const registrations = this.store.getAll();
+    private handleListRegistrations(role?: string): unknown {
+        const registrations = role
+            ? this.store.getByRole(role as AgentRole)
+            : this.store.getAll();
         return {
             registrations: registrations.map(r => ({
                 id: r.id,
                 name: r.name,
                 description: r.description,
+                roles: r.roles,
                 execution_type: r.execution.type,
                 default_timeout: r.defaultTimeout,
                 input_count: r.interface.inputs.length,

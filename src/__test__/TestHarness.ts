@@ -12,6 +12,8 @@ import * as os from 'os';
 import * as net from 'net';
 import * as http from 'http';
 import { SeraCore, SeraCoreOptions } from '../server';
+import { CredentialStore } from '../credentials/CredentialStore';
+import { generateApiKey, hashApiKey } from '../api/authMiddleware';
 
 export interface TestnetInstance {
     /** The running SeraCore instance */
@@ -30,6 +32,8 @@ export interface TestnetInstance {
     mcpUrl: string;
     /** Base URL for debug MCP endpoint (e.g. http://localhost:PORT/mcp) */
     debugMcpUrl: string;
+    /** API key for authenticated requests (only set when auth is configured) */
+    apiKey?: string;
 
     /** Create a test audit via REST API */
     createAudit(slug: string, name: string, workspace: string): Promise<void>;
@@ -57,7 +61,7 @@ async function findFreePort(): Promise<number> {
 /**
  * Make an HTTP request and return the parsed JSON body
  */
-function httpJson(method: string, url: string, body?: any): Promise<any> {
+function httpJson(method: string, url: string, body?: any, extraHeaders?: Record<string, string>): Promise<any> {
     return new Promise((resolve, reject) => {
         const parsed = new URL(url);
         const options: http.RequestOptions = {
@@ -65,7 +69,7 @@ function httpJson(method: string, url: string, body?: any): Promise<any> {
             port: parsed.port,
             path: parsed.pathname + parsed.search,
             method,
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...extraHeaders },
         };
 
         const req = http.request(options, (res) => {
@@ -95,6 +99,11 @@ export interface CreateTestnetOptions {
     auditName?: string;
     /** Workspace path to register (used with auditSlug) */
     workspacePath?: string;
+    /** Auth configuration override */
+    auth?: {
+        enabled: boolean;
+        skipLocalhost?: boolean;
+    };
 }
 
 /**
@@ -115,6 +124,25 @@ export async function createTestnet(options?: CreateTestnetOptions): Promise<Tes
     const resourcesDir = path.join(seraHome, 'resources');
     fs.mkdirSync(path.join(resourcesDir, 'agents'), { recursive: true });
 
+    // Write auth config and pre-store API key if auth is enabled
+    let testApiKey: string | undefined;
+    if (options?.auth) {
+        const configData = {
+            auth: {
+                enabled: options.auth.enabled,
+                skipLocalhost: options.auth.skipLocalhost ?? true,
+            },
+        };
+        fs.writeFileSync(path.join(seraHome, 'config.json'), JSON.stringify(configData), 'utf-8');
+
+        // Pre-store an API key so the harness can make authenticated requests
+        if (options.auth.enabled) {
+            testApiKey = generateApiKey();
+            const store = new CredentialStore(seraHome);
+            store.saveWithId('testnet-key', 'sera-auth', 'Testnet Key', hashApiKey(testApiKey));
+        }
+    }
+
     const coreOptions: SeraCoreOptions = {
         seraHome,
         clientPort,
@@ -131,6 +159,9 @@ export async function createTestnet(options?: CreateTestnetOptions): Promise<Tes
     const mcpUrl = `http://localhost:${mcpPort}/mcp`;
     const debugMcpUrl = `http://localhost:${debugPort}/mcp`;
 
+    // Auth headers for internal harness calls (when auth is enabled)
+    const authHeaders = testApiKey ? { Authorization: `Bearer ${testApiKey}` } : undefined;
+
     const instance: TestnetInstance = {
         core,
         seraHome,
@@ -140,12 +171,13 @@ export async function createTestnet(options?: CreateTestnetOptions): Promise<Tes
         clientUrl,
         mcpUrl,
         debugMcpUrl,
+        apiKey: testApiKey,
 
         async createAudit(slug: string, name: string, workspace: string): Promise<void> {
             const result = await httpJson('POST', `${clientUrl}/api/audits`, {
                 name,
                 workspacePath: workspace,
-            });
+            }, authHeaders);
             if (result.error) {
                 throw new Error(`Failed to create audit: ${result.error}`);
             }
@@ -156,7 +188,7 @@ export async function createTestnet(options?: CreateTestnetOptions): Promise<Tes
             const id = mcpRequestId++;
             const body: any = { jsonrpc: '2.0', id, method };
             if (params) { body.params = params; }
-            return httpJson('POST', url, body);
+            return httpJson('POST', url, body, authHeaders);
         },
 
         async teardown(): Promise<void> {

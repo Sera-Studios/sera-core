@@ -12,6 +12,9 @@ import {
     HandlerContext,
     TableSchema,
 } from '@sera/types';
+import { createLogger } from '../../logging/Logger';
+
+const log = createLogger('testcoverage-handler');
 
 const TEST_SCHEMAS: TableSchema[] = [
     {
@@ -214,7 +217,7 @@ export class TestCoverageHandler implements PortableMcpHandler {
             createdAt: new Date().toISOString(),
         });
 
-        console.log(`[TestCoverageHandler] Mapping submitted: ${mappingId}`);
+        log.info('Mapping submitted', { mappingId });
         return { mapping_id: mappingId };
     }
 
@@ -245,7 +248,7 @@ export class TestCoverageHandler implements PortableMcpHandler {
     }
 
     private async handleReportFailure(args: Record<string, unknown>, ctx: HandlerContext): Promise<{ reported: boolean }> {
-        console.log(`[TestCoverageHandler] Test failure: ${args.test_file}::${args.test_name} - ${args.error}`);
+        log.info('Test failure', { testFile: String(args.test_file), testName: String(args.test_name), error: String(args.error) });
         // In sera-core, we emit a bridge event that VS Code clients can show as a notification
         ctx.bridge.emit('test:failure', {
             testFile: args.test_file,
@@ -300,7 +303,7 @@ export class TestCoverageHandler implements PortableMcpHandler {
             await ctx.db.sql(`DELETE FROM sessionbridge_test_mappings`, []);
         }
 
-        console.log(`[TestCoverageHandler] Cleared ${count} mappings`);
+        log.info('Cleared mappings', { count });
         return { cleared: true, count };
     }
 }

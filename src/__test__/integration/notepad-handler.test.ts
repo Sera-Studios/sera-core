@@ -169,6 +169,133 @@ describe('NotepadHandler', () => {
     });
 
     // ========================================================================
+    // list_findings
+    // ========================================================================
+
+    describe('list_findings', () => {
+        it('returns empty list when no findings exist', async () => {
+            await setup();
+
+            const result = await client.callTool('list_findings', {});
+            expect(result.isError).not.toBe(true);
+            const data = parseResult(result);
+            expect(data.count).toBe(0);
+            expect(data.findings).toEqual([]);
+        });
+
+        it('returns all findings by default', async () => {
+            await setup();
+
+            // Submit two findings
+            await client.callTool('submit_finding', {
+                file: 'contracts/A.sol',
+                start_line: 1,
+                end_line: 5,
+                title: 'Finding A',
+                severity: 'high',
+                description: 'Desc A',
+                recommendation: 'Fix A',
+            });
+            await client.callTool('submit_finding', {
+                file: 'contracts/B.sol',
+                start_line: 10,
+                end_line: 20,
+                title: 'Finding B',
+                severity: 'medium',
+                description: 'Desc B',
+                recommendation: 'Fix B',
+            });
+
+            const result = await client.callTool('list_findings', {});
+            expect(result.isError).not.toBe(true);
+            const data = parseResult(result);
+            expect(data.count).toBe(2);
+            expect(data.findings[0].title).toBeDefined();
+            expect(data.findings[0].severity).toBeDefined();
+        });
+
+        it('filters by validated status', async () => {
+            await setup();
+
+            // Submit two findings, finalise one
+            const r1 = await client.callTool('submit_finding', {
+                file: 'contracts/A.sol',
+                start_line: 1,
+                end_line: 5,
+                title: 'Validated finding',
+                severity: 'critical',
+                description: 'Desc',
+                recommendation: 'Fix',
+            });
+            const { finding_id } = parseResult(r1);
+            await client.callTool('finalise_finding', { finding_id });
+
+            await client.callTool('submit_finding', {
+                file: 'contracts/B.sol',
+                start_line: 1,
+                end_line: 5,
+                title: 'Unvalidated finding',
+                severity: 'low',
+                description: 'Desc',
+                recommendation: 'Fix',
+            });
+
+            // Filter validated
+            const validatedResult = await client.callTool('list_findings', { status: 'validated' });
+            const validatedData = parseResult(validatedResult);
+            expect(validatedData.count).toBe(1);
+            expect(validatedData.findings[0].title).toBe('Validated finding');
+            expect(validatedData.findings[0].validated).toBe(1);
+
+            // Filter unvalidated
+            const unvalidatedResult = await client.callTool('list_findings', { status: 'unvalidated' });
+            const unvalidatedData = parseResult(unvalidatedResult);
+            expect(unvalidatedData.count).toBe(1);
+            expect(unvalidatedData.findings[0].title).toBe('Unvalidated finding');
+            expect(unvalidatedData.findings[0].validated).toBe(0);
+
+            // All
+            const allResult = await client.callTool('list_findings', { status: 'all' });
+            const allData = parseResult(allResult);
+            expect(allData.count).toBe(2);
+        });
+
+        it('does not include non-issue notes', async () => {
+            await setup();
+
+            // Submit a POI and a comment (should not appear in findings)
+            await client.callTool('submit_poi', {
+                file: 'contracts/A.sol',
+                start_line: 1,
+                end_line: 1,
+                text: 'A POI',
+            });
+            await client.callTool('submit_comment', {
+                file: 'contracts/A.sol',
+                start_line: 1,
+                end_line: 1,
+                text: 'A comment',
+            });
+
+            // Submit one finding
+            await client.callTool('submit_finding', {
+                file: 'contracts/A.sol',
+                start_line: 1,
+                end_line: 5,
+                title: 'Only finding',
+                severity: 'high',
+                description: 'Desc',
+                recommendation: 'Fix',
+            });
+
+            const result = await client.callTool('list_findings', {});
+            const data = parseResult(result);
+            expect(data.count).toBe(1);
+            expect(data.findings[0].title).toBe('Only finding');
+        });
+    });
+
+    // ========================================================================
     // submit_comment
     // ========================================================================
 

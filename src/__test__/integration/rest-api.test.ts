@@ -48,7 +48,7 @@ describe('REST API', () => {
             const { status, data } = await httpRequest('GET', `${testnet.clientUrl}/api/health`);
 
             expect(status).toBe(200);
-            expect(data.status).toBe('ok');
+            expect(data.status).toBe('healthy');
             expect(data.version).toBeDefined();
             expect(data.uptime).toBeGreaterThanOrEqual(0);
         });
